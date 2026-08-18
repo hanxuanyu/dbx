@@ -4853,7 +4853,22 @@ const domSelectionDragOverlayStyle = computed((): CSSProperties | undefined => {
   };
 });
 
-function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number) {
+function stopReleasedSelectionGesture(event: MouseEvent): boolean {
+  if ((event.buttons & 1) !== 0) return false;
+  let stopped = false;
+  if (isSelectingCells.value) {
+    finishCellSelection();
+    stopped = true;
+  }
+  if (selection.isSelectingRows.value) {
+    selection.finishRowSelection();
+    stopped = true;
+  }
+  return stopped;
+}
+
+function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent) {
+  stopReleasedSelectionGesture(event);
   if (!isSelectingCells.value) {
     quickDownloadMenuCell.value = retainBinaryCellDownloadMenuForHover(quickDownloadMenuCell.value, { rowIndex, col: actualColIdx });
     if (!isScrolling.value) hoveredDetailCell.value = { rowIndex, col: actualColIdx };
@@ -6187,6 +6202,7 @@ function onDomGridWheel(event: WheelEvent) {
 }
 
 function onCanvasMouseMove(event: MouseEvent) {
+  stopReleasedSelectionGesture(event);
   if (columnHeaderPointerInteractionActive()) {
     if (canvasRef.value) canvasRef.value.style.cursor = "default";
     onCanvasMouseLeave();
@@ -6216,7 +6232,7 @@ function onCanvasMouseMove(event: MouseEvent) {
     if (previousActualColIdx !== undefined) onCellMouseleave(previous.rowIndex, previousActualColIdx);
   }
   canvasHoverCell.value = next;
-  if (next && actualColIdx !== undefined) onCellMouseenter(next.rowIndex, next.visibleColIdx, actualColIdx);
+  if (next && actualColIdx !== undefined) onCellMouseenter(next.rowIndex, next.visibleColIdx, actualColIdx, event);
   scheduleCanvasDraw();
 }
 
@@ -11667,7 +11683,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           prepareDataCellMouseDown(item, col.actualColIdx);
                           handleDataCellMousedown(item.displayIndex, col.visibleColIdx, item.id, $event);
                         "
-                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx)"
+                        @mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"
                         @mouseleave="onCellMouseleave(item.displayIndex, col.actualColIdx)"
                         @dblclick="onDomCellDblClick(item, col.actualColIdx, $event)"
                         :data-visible-col-index="col.visibleColIdx"
