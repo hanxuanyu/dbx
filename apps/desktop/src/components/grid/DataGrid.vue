@@ -4535,6 +4535,10 @@ const selection = useDataGridSelection({
   cellFromClientPoint: dataGridCellFromClientPoint,
   rowFromClientPoint: dataGridRowFromClientPoint,
   onUserCellSelection: invalidateSyntheticContextSelection,
+  // Canvas schedules its draw before the document-level mousemove handler runs,
+  // so its row state must be current before that frame is painted.
+  shouldUpdateDraggedRowsImmediately: () => useCanvasGridRows.value,
+  onDraggedRowSelectionChange: scheduleCanvasDraw,
   runtimeScope: dataGridRuntimeScope,
 });
 

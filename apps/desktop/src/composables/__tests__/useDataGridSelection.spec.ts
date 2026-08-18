@@ -2,7 +2,14 @@ import { computed, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 
-function createSelection(options?: { getScrollElement?: () => HTMLElement | null; cellFromClientPoint?: (clientX: number, clientY: number) => { rowIndex: number; colIndex: number } | null; rowFromClientPoint?: (clientX: number, clientY: number) => number | null; onUserCellSelection?: () => void }) {
+function createSelection(options?: {
+  getScrollElement?: () => HTMLElement | null;
+  cellFromClientPoint?: (clientX: number, clientY: number) => { rowIndex: number; colIndex: number } | null;
+  rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
+  onUserCellSelection?: () => void;
+  shouldUpdateDraggedRowsImmediately?: () => boolean;
+  onDraggedRowSelectionChange?: () => void;
+}) {
   const columns = computed(() => ["id", "name", "email"]);
   const displayItems = computed(() =>
     [1, 2, 3, 4].map((id, index) => ({
@@ -28,6 +35,8 @@ function createSelection(options?: { getScrollElement?: () => HTMLElement | null
     cellFromClientPoint: options?.cellFromClientPoint,
     rowFromClientPoint: options?.rowFromClientPoint,
     onUserCellSelection: options?.onUserCellSelection,
+    shouldUpdateDraggedRowsImmediately: options?.shouldUpdateDraggedRowsImmediately,
+    onDraggedRowSelectionChange: options?.onDraggedRowSelectionChange,
   });
 }
 
@@ -345,6 +354,40 @@ describe("useDataGridSelection", () => {
 
       expect(selection.isSelectingRows.value).toBe(false);
       expect(selection.selectedRowIds.value).toEqual(new Set([2]));
+    } finally {
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("updates row drags synchronously and invalidates the final mouseup selection", () => {
+    const pointerDocument = installPointerDocument();
+    const onDraggedRowSelectionChange = vi.fn();
+    let pointerRow = 1;
+    const selection = createSelection({
+      rowFromClientPoint: () => pointerRow,
+      shouldUpdateDraggedRowsImmediately: () => true,
+      onDraggedRowSelectionChange,
+    });
+
+    try {
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 5, clientY: 10, preventDefault() {} } as MouseEvent);
+      onDraggedRowSelectionChange.mockClear();
+
+      pointerRow = 2;
+      pointerDocument.dispatch("mousemove", { clientX: 5, clientY: 40 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(1);
+
+      pointerRow = 3;
+      pointerDocument.dispatch("mouseup", { clientX: 5, clientY: 66 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(2);
+
+      pointerRow = 0;
+      pointerDocument.dispatch("mousemove", { clientX: 5, clientY: 92 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(2);
     } finally {
       selection.finishRowSelection();
       pointerDocument.restore();

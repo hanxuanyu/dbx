@@ -27,6 +27,8 @@ export interface UseDataGridSelectionOptions {
   cellFromClientPoint?: (clientX: number, clientY: number) => CellPosition | null;
   rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
   onUserCellSelection?: () => void;
+  shouldUpdateDraggedRowsImmediately?: () => boolean;
+  onDraggedRowSelectionChange?: () => void;
   runtimeScope?: DataGridRuntimeScope;
 }
 
@@ -420,6 +422,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
       }
     }
     rowSelectionFocusIndex = focusRowIndex;
+    options.onDraggedRowSelectionChange?.();
   }
 
   function updateRowSelectionFromPointer() {
@@ -441,6 +444,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     if (!confirmSelectionDrag(event.clientX, event.clientY)) return;
     selectionPointerClientX = event.clientX;
     selectionPointerClientY = event.clientY;
+    if (options.shouldUpdateDraggedRowsImmediately?.()) updateRowSelectionFromPointer();
     if (!selectionAutoScrollFrame) selectionAutoScrollFrame = requestAnimationFrame(runSelectionAutoScroll);
   }
 
