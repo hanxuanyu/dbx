@@ -28,6 +28,7 @@ import {
   doltDeleteTagSql,
   doltDiscardWorkingTreeSql,
   doltDiffSummarySql,
+  doltClientSessionScope,
   doltGraphEdgePath,
   doltGraphEdgeRoute,
   doltHardResetSql,
@@ -56,6 +57,7 @@ import {
   type DoltTableChange,
   type DoltTableChangeFlag,
   type DoltWorkingChange,
+  type DoltClientSessionScope,
 } from "@/lib/dolt/doltVersionControl";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -124,7 +126,7 @@ const commitHistoryError = ref("");
 const discardWorkingTreeDialogOpen = ref(false);
 const discardWorkingTreeError = ref("");
 const activeDatabase = computed(() => selectedDatabase.value || baseDatabaseName(props.database));
-const clientSessionId = computed(() => `dolt-version-control:${props.connectionId}:${activeDatabase.value}`);
+const clientSessionId = computed(() => doltClientSessionScope(props.connectionId, activeDatabase.value).clientSessionId);
 let loadGeneration = 0;
 let comparisonGeneration = 0;
 let tableDiffGeneration = 0;
@@ -437,6 +439,7 @@ function refreshDatabaseOptionsOnOpen(open: boolean) {
 
 function switchDatabase(database: unknown) {
   if (typeof database !== "string" || !database || database === activeDatabase.value) return;
+  const previousSession = doltClientSessionScope(props.connectionId, activeDatabase.value);
   databaseSwitching.value = true;
   clearDatabaseContext();
   selectedDatabase.value = database;
@@ -444,16 +447,18 @@ function switchDatabase(database: unknown) {
   if (tab) {
     tab.workspaceBranch = undefined;
     queryStore.updateDatabase(tab.id, database);
-  } else void reloadDatabaseContext(database);
+  } else void reloadDatabaseContext(database, undefined, previousSession);
 }
 
-async function reloadDatabaseContext(database: string, requestedBranch = props.initialBranch) {
+async function reloadDatabaseContext(database: string, requestedBranch = props.initialBranch, previousSession?: DoltClientSessionScope) {
   const generation = ++databaseSwitchGeneration;
   const targetDatabase = baseDatabaseName(database);
   const resetCurrentDatabaseSession = !requestedBranch && activeBranch.value && activeDatabase.value === targetDatabase;
   selectedDatabase.value = targetDatabase;
   try {
-    if (resetCurrentDatabaseSession) {
+    if (previousSession) {
+      await api.closeClientConnectionSession(previousSession.connectionId, previousSession.database, previousSession.clientSessionId).catch(() => undefined);
+    } else if (resetCurrentDatabaseSession) {
       await api.closeClientConnectionSession(props.connectionId, targetDatabase, clientSessionId.value).catch(() => undefined);
     }
     await loadDatabaseOptions();
@@ -1174,7 +1179,8 @@ watch(
   ([connectionId, database, branch], [previousConnectionId, previousDatabase, previousBranch]) => {
     const databaseChanged = connectionId !== previousConnectionId || database !== previousDatabase;
     const branchTargetChanged = branch !== previousBranch && branch !== activeBranch.value;
-    if (databaseChanged || branchTargetChanged) void reloadDatabaseContext(database, branch);
+    const previousSession = databaseChanged ? doltClientSessionScope(previousConnectionId, baseDatabaseName(previousDatabase)) : undefined;
+    if (databaseChanged || branchTargetChanged) void reloadDatabaseContext(database, branch, previousSession);
   },
 );
 

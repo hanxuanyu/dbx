@@ -6,6 +6,7 @@ import {
   doltCommitSql,
   doltCreateBranchSql,
   doltCreateTagSql,
+  doltClientSessionScope,
   doltDeleteBranchSql,
   doltDeleteTagSql,
   doltDiffSummarySql,
@@ -40,6 +41,7 @@ function result(columns: string[], rows: QueryResult["rows"]): QueryResult {
 describe("doltVersionControl", () => {
   it("quotes revision and table arguments in generated SQL", () => {
     expect(doltLogSql("feature/o'hare", 10)).toBe("SELECT * FROM DOLT_LOG('feature/o''hare', '--parents', '--decorate', 'short') LIMIT 10");
+    expect(doltLogSql("feature\\o'hare", 10)).toBe("SELECT * FROM DOLT_LOG('feature\\\\o''hare', '--parents', '--decorate', 'short') LIMIT 10");
     expect(doltStatusSql()).toBe("SELECT table_name, staged, status FROM dolt_status ORDER BY table_name, staged DESC");
     expect(doltAddAllSql()).toBe("CALL DOLT_ADD('.')");
     expect(doltCommitSql("fix user's row")).toBe("CALL DOLT_COMMIT('-m', 'fix user''s row')");
@@ -56,6 +58,15 @@ describe("doltVersionControl", () => {
     expect(doltCreateTagSql("v1'o", "HEAD")).toBe("CALL DOLT_TAG('v1''o', 'HEAD')");
     expect(doltDeleteTagSql("v0'o")).toBe("CALL DOLT_TAG('-d', 'v0''o')");
     expect(doltDeleteBranchSql("old'branch")).toBe("CALL DOLT_BRANCH('-d', 'old''branch')");
+  });
+
+  it("builds database-scoped client sessions", () => {
+    expect(doltClientSessionScope("connection-1", "database_a")).toEqual({
+      connectionId: "connection-1",
+      database: "database_a",
+      clientSessionId: "dolt-version-control:connection-1:database_a",
+    });
+    expect(doltClientSessionScope("connection-1", "database_b").clientSessionId).not.toBe(doltClientSessionScope("connection-1", "database_a").clientSessionId);
   });
 
   it("parses staged and unstaged working tree changes", () => {

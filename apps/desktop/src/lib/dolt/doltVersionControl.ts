@@ -88,6 +88,12 @@ export interface DoltGraphEdge {
   colorRef: string | null;
 }
 
+export interface DoltClientSessionScope {
+  connectionId: string;
+  database: string;
+  clientSessionId: string;
+}
+
 export type DoltGraphEdgeRoute = "direct" | "fork" | "merge";
 const DOLT_GRAPH_DIAGONAL_HEIGHT = 30;
 
@@ -107,8 +113,16 @@ export function doltGraphEdgePath(startX: number, startY: number, targetX: numbe
   return `M ${startX} ${startY} L ${startX} ${targetY - direction * diagonalHeight} L ${targetX} ${targetY}`;
 }
 
+export function doltClientSessionScope(connectionId: string, database: string): DoltClientSessionScope {
+  return {
+    connectionId,
+    database,
+    clientSessionId: `dolt-version-control:${connectionId}:${database}`,
+  };
+}
+
 export function doltSqlLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
 }
 
 export function doltLogSql(revision: string, limit = 500): string {
