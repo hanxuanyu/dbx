@@ -8,7 +8,7 @@ describe("DataGrid selection gesture ownership", () => {
     expect(source).toContain("function stopReleasedSelectionGesture(event: MouseEvent)");
     expect(source).toContain("if ((event.buttons & 1) !== 0) return false;");
     expect(source).toContain("function onCellMouseenter(rowIndex: number, visibleColIdx: number, actualColIdx: number, event: MouseEvent)");
-    expect(source).toContain("@mouseenter=\"onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)\"");
+    expect(source).toContain('@mouseenter="onCellMouseenter(item.displayIndex, col.visibleColIdx, col.actualColIdx, $event)"');
 
     const canvasMove = source.slice(source.indexOf("function onCanvasMouseMove"), source.indexOf("function onCanvasMouseLeave"));
     expect(canvasMove).toContain("stopReleasedSelectionGesture(event);");
