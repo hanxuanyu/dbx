@@ -1023,7 +1023,19 @@ async function executeRedisCommand(command: string): Promise<boolean> {
   return (await redisKeyBrowserRef.value?.executeCommand?.(command)) ?? false;
 }
 
-defineExpose({ focusSearch, refreshData, refreshQueryEditorCompletionCache, handleModRTarget, requestQueryEditorExecute, requestQueryEditorExecuteInNewResultTab, acceptQueryEditorExecutionViewport, pasteClipboardAsSqlInCondition, applyTableStructureChanges, insertRedisCommand, executeRedisCommand });
+defineExpose({
+  focusSearch,
+  refreshData,
+  refreshQueryEditorCompletionCache,
+  handleModRTarget,
+  requestQueryEditorExecute,
+  requestQueryEditorExecuteInNewResultTab,
+  acceptQueryEditorExecutionViewport,
+  pasteClipboardAsSqlInCondition,
+  applyTableStructureChanges,
+  insertRedisCommand,
+  executeRedisCommand,
+});
 </script>
 
 <template>
