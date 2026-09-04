@@ -2,8 +2,16 @@
 
 PNPM ?= pnpm
 TAURI_DEV_PORT ?= 1420
+DBX_STATIC_TARGET ?= $(if $(filter arm64 aarch64,$(shell uname -m)),aarch64-unknown-linux-musl,x86_64-unknown-linux-musl)
+DBX_STATIC_FEATURES ?= duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled
 
-.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build package clean docs docs-build check test cargo-check-fast cargo-test-fast db db-list db-verify db-down db-reset db-check db-completion
+ifeq ($(DBX_STATIC_TARGET),aarch64-unknown-linux-musl)
+DBX_STATIC_RUSTFLAGS ?= -C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536
+else
+DBX_STATIC_RUSTFLAGS ?= -C target-feature=+crt-static
+endif
+
+.PHONY: help install docs-install check-tauri-dev-port dev dev-fast dev-web dev-backend build build-web-binary build-web-binary-x64 build-web-binary-arm64 package clean docs docs-build check test cargo-check-fast cargo-test-fast db db-list db-verify db-down db-reset db-check db-completion
 
 export DB
 export DB_VERSION
@@ -29,6 +37,9 @@ help:
 	@printf '  %-23s %s\n' 'make dev-web' 'Start the web frontend development server'
 	@printf '  %-23s %s\n' 'make dev-backend' 'Start the web backend development server'
 	@printf '  %-23s %s\n' 'make build' 'Run type checks and build the desktop frontend'
+	@printf '  %-23s %s\n' 'make build-web-binary' 'Build a portable Linux Web server bundle for the host architecture'
+	@printf '  %-23s %s\n' 'make build-web-binary-x64' 'Build the portable Linux x64 Web server bundle'
+	@printf '  %-23s %s\n' 'make build-web-binary-arm64' 'Build the portable Linux ARM64 Web server bundle'
 	@printf '  %-23s %s\n' 'make package' 'Build the desktop app package'
 	@printf '  %-23s %s\n' 'make clean' 'Remove local Rust build artifacts and caches'
 	@printf '%s\n' ''
@@ -90,6 +101,25 @@ dev-backend: node_modules/.modules.yaml
 
 build: node_modules/.modules.yaml
 	$(PNPM) build:checked
+
+build-web-binary: node_modules/.modules.yaml
+	@case "$(DBX_STATIC_TARGET)" in \
+		x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) ;; \
+		*) echo "Unsupported DBX_STATIC_TARGET: $(DBX_STATIC_TARGET)" >&2; exit 2 ;; \
+	esac
+	@command -v cargo-zigbuild >/dev/null 2>&1 || { echo "cargo-zigbuild is required; install it with: cargo install cargo-zigbuild" >&2; exit 1; }
+	@command -v readelf >/dev/null 2>&1 || { echo "readelf is required; install binutils before building the Web binary" >&2; exit 1; }
+	@command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum is required; install coreutils before building the Web binary" >&2; exit 1; }
+	rustup target add $(DBX_STATIC_TARGET)
+	$(PNPM) build
+	RUSTFLAGS='$(DBX_STATIC_RUSTFLAGS)' cargo zigbuild --release -p dbx-web --target $(DBX_STATIC_TARGET) --no-default-features --features "$(DBX_STATIC_FEATURES)"
+	DBX_STATIC_TARGET=$(DBX_STATIC_TARGET) ./scripts/package-web-static.sh
+
+build-web-binary-x64:
+	$(MAKE) build-web-binary DBX_STATIC_TARGET=x86_64-unknown-linux-musl DBX_STATIC_RUSTFLAGS='-C target-feature=+crt-static'
+
+build-web-binary-arm64:
+	$(MAKE) build-web-binary DBX_STATIC_TARGET=aarch64-unknown-linux-musl DBX_STATIC_RUSTFLAGS='-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536'
 
 package: node_modules/.modules.yaml
 	$(PNPM) tauri build
