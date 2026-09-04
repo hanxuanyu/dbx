@@ -3,7 +3,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -313,6 +313,14 @@ pub struct AiChatSelectionState {
     pub effort_preferences: Vec<AiModelEffortPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<AiAssistantMode>,
+    /// Prompt template ids auto-applied when the AI panel opens, keyed by
+    /// connection db_type. BTreeMap keeps serialized key order stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_templates_by_db_type: BTreeMap<String, Vec<String>>,
+    /// Prompt template ids from the most recent send, keyed by connection
+    /// db_type; used as fallback when no defaults are configured.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_used_templates_by_db_type: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AiChatSelectionState {
@@ -322,6 +330,8 @@ impl Default for AiChatSelectionState {
             active: None,
             effort_preferences: Vec::new(),
             default_mode: None,
+            default_templates_by_db_type: BTreeMap::new(),
+            last_used_templates_by_db_type: BTreeMap::new(),
         }
     }
 }
@@ -389,6 +399,9 @@ pub struct AiConfig {
     /// persist this field; it is attached to a runtime config clone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_effort: Option<AiEffortSelection>,
+    /// Optional output token budget configured for this provider.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
     #[serde(default)]
     pub context_window: Option<u32>,
     /// Maximum number of automatic retries on transient API errors
@@ -1204,8 +1217,12 @@ pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
     event["delta"].as_str().filter(|s| !s.is_empty())
 }
 
-fn responses_max_output_tokens(max_tokens: Option<u32>) -> u32 {
-    max_tokens.unwrap_or(2048).max(16)
+fn output_token_limit(max_tokens: Option<u32>, config: &AiConfig, default: u32) -> u32 {
+    max_tokens.or(config.max_output_tokens).unwrap_or(default)
+}
+
+fn responses_max_output_tokens(max_tokens: Option<u32>, config: &AiConfig) -> u32 {
+    output_token_limit(max_tokens, config, 2048).max(16)
 }
 
 fn responses_token_usage(event: &serde_json::Value) -> Option<TokenUsage> {
@@ -1237,7 +1254,8 @@ fn uses_chat_completion_max_completion_tokens(config: &AiConfig) -> bool {
         || is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
 }
 
-fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: Option<u32>) {
+    let max_tokens = output_token_limit(max_tokens, config, 4096);
     if uses_chat_completion_max_completion_tokens(config) {
         body["max_completion_tokens"] = json!(max_tokens);
     } else {
@@ -1251,7 +1269,7 @@ fn apply_minimax_chat_completion_fields(body: &mut serde_json::Value, config: &A
     }
 }
 
-fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig, max_tokens: Option<u32>) {
     set_chat_completion_token_limit(body, config, max_tokens);
     apply_minimax_chat_completion_fields(body, config);
     apply_chat_completion_thinking_toggle(body, config);
@@ -1261,11 +1279,13 @@ fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig
 /// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
 /// and reject the OpenAI-compatible `extra_body.chat_template_kwargs` toggle.
 ///
-/// Matches `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, K3+, and future versions,
-/// while excluding older K2 variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
-/// Regex equivalent: /kimi-k(?:2\.[5-9]\d*|[3-9]\d*)/
+/// Matches current Kimi IDs and legacy catalog aliases while excluding older K2
+/// variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
 fn is_kimi_model(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
+    if matches!(model.as_str(), "k3" | "kimi-for-coding" | "kimi-for-coding-highspeed") {
+        return true;
+    }
     if let Some(rest) = model.strip_prefix("kimi-k") {
         if rest.starts_with("2.") && rest.len() > 2 {
             // K2.x — the digit after "2." must be >= 5 (so K2.5+)
@@ -2121,7 +2141,7 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
 pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(2048),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": claude_messages(&request.messages),
     });
@@ -2201,7 +2221,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "model": request.config.model,
         "messages": messages,
     });
-    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2226,7 +2246,7 @@ pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionR
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
@@ -2256,7 +2276,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         },
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(2048),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 2048),
         },
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -2775,7 +2795,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                                 "messages": messages,
                                 "stream": true,
                             });
-                            decorate_chat_completion_body(&mut body, &config_inner, 16);
+                            decorate_chat_completion_body(&mut body, &config_inner, Some(16));
                             body
                         };
                         let headers = maybe_bearer_headers(&config_inner)?;
@@ -3155,7 +3175,7 @@ async fn stream_claude(
 ) -> Result<(), String> {
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(2048),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": claude_messages(&request.messages),
         "stream": true,
@@ -3263,7 +3283,7 @@ async fn stream_openai(
         "messages": messages,
         "stream": true,
     });
-    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
@@ -3394,7 +3414,7 @@ async fn stream_responses_api(
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
         "stream": true,
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -3486,7 +3506,7 @@ async fn stream_gemini(
         },
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(2048),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 2048),
         },
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -3721,7 +3741,7 @@ async fn stream_claude_with_tools(
 
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(4096),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 4096),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
         "tools": tool_json,
@@ -3906,7 +3926,7 @@ async fn stream_openai_with_tools(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
+    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens);
     apply_minimax_chat_completion_fields(&mut body, &request.config);
 
     if request.config.runtime_effort.is_none() && !request.config.enable_thinking {
@@ -4082,7 +4102,7 @@ async fn stream_responses_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input_with_tools(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
         "tools": tool_json,
         "tool_choice": "auto",
         "stream": true,
@@ -4334,7 +4354,7 @@ async fn stream_gemini_with_tools(
         "systemInstruction": { "parts": [{ "text": request.system_prompt }] },
         "tools": [{ "functionDeclarations": tool_declarations }],
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 4096),
         }
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -4592,6 +4612,27 @@ mod tests {
     }
 
     #[test]
+    fn ai_config_max_output_tokens_uses_camel_case_and_defaults_to_none() {
+        let configured: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "maxOutputTokens": 32_768
+        }))
+        .unwrap();
+        assert_eq!(configured.max_output_tokens, Some(32_768));
+
+        let legacy: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash"
+        }))
+        .unwrap();
+        assert_eq!(legacy.max_output_tokens, None);
+
+        let serialized = serde_json::to_value(configured).unwrap();
+        assert_eq!(serialized["maxOutputTokens"], serde_json::json!(32_768));
+    }
+
+    #[test]
     fn ai_chat_selection_default_mode_serde() {
         // Old blobs without a defaultMode field load as None (no migration needed).
         let legacy: AiChatSelectionState =
@@ -4830,6 +4871,7 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: AiReasoningLevel::Default,
+                max_output_tokens: None,
                 runtime_effort: None,
                 context_window: Some(1_000_000),
                 max_retries: None,
@@ -5493,6 +5535,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5534,6 +5577,7 @@ mod tests {
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5573,6 +5617,7 @@ mod tests {
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5612,6 +5657,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5655,6 +5701,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5695,6 +5742,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5719,7 +5767,7 @@ mod tests {
         for provider in
             [AiProvider::Ollama, AiProvider::AnthropicCompatible, AiProvider::OpenaiCompatible, AiProvider::Custom]
         {
-            let config = AiConfig { provider, ..base.clone() };
+            let config = AiConfig { max_output_tokens: None, provider, ..base.clone() };
             assert!(validate_config(&config).is_ok());
             assert!(validate_model_list_config(&config).is_ok());
             assert!(maybe_bearer_headers(&config).unwrap().get(AUTHORIZATION).is_none());
@@ -5733,7 +5781,7 @@ mod tests {
             AiProvider::Qwen,
             AiProvider::MiniMax,
         ] {
-            let config = AiConfig { provider, ..base.clone() };
+            let config = AiConfig { max_output_tokens: None, provider, ..base.clone() };
             assert_eq!(validate_config(&config).unwrap_err(), "API key is required");
             assert_eq!(validate_model_list_config(&config).unwrap_err(), "API key is required");
         }
@@ -5754,6 +5802,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5789,6 +5838,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5827,6 +5877,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5852,19 +5903,24 @@ mod tests {
         assert_eq!(resolve_endpoint(&config), "https://gateway.example.com/anthropic/v1/messages");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://gateway.example.com/anthropic/v1/models");
 
-        let full_messages =
-            AiConfig { endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(), ..config.clone() };
+        let full_messages = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(),
+            ..config.clone()
+        };
         assert_eq!(resolve_endpoint(&full_messages), "https://gateway.example.com/anthropic/v1/messages");
         assert_eq!(
             resolve_model_list_endpoint(&full_messages).unwrap(),
             "https://gateway.example.com/anthropic/v1/models"
         );
 
-        let bare_origin = AiConfig { endpoint: "https://gateway.example.com".to_string(), ..config.clone() };
+        let bare_origin =
+            AiConfig { max_output_tokens: None, endpoint: "https://gateway.example.com".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&bare_origin), "https://gateway.example.com/v1/messages");
         assert_eq!(resolve_model_list_endpoint(&bare_origin).unwrap(), "https://gateway.example.com/v1/models");
 
         let kimi_coding = AiConfig {
+            max_output_tokens: None,
             endpoint: "https://api.kimi.com/coding/".to_string(),
             model: "kimi-for-coding".to_string(),
             ..config.clone()
@@ -5881,16 +5937,26 @@ mod tests {
         assert_eq!(resolve_endpoint(&config), "https://gateway.example.com/v1/messages");
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://gateway.example.com/v1/models");
 
-        let v1 = AiConfig { endpoint: "https://gateway.example.com/v1".to_string(), ..config.clone() };
+        let v1 = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://gateway.example.com/v1".to_string(),
+            ..config.clone()
+        };
         assert_eq!(resolve_endpoint(&v1), "https://gateway.example.com/v1/messages");
 
-        let nested =
-            AiConfig { endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(), ..config.clone() };
+        let nested = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://gateway.example.com/anthropic/v1/messages".to_string(),
+            ..config.clone()
+        };
         assert_eq!(resolve_endpoint(&nested), "https://gateway.example.com/anthropic/v1/messages");
         assert_eq!(resolve_model_list_endpoint(&nested).unwrap(), "https://gateway.example.com/anthropic/v1/models");
 
-        let dashscope =
-            AiConfig { endpoint: "https://dashscope-intl.aliyuncs.com/apps/anthropic".to_string(), ..config.clone() };
+        let dashscope = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://dashscope-intl.aliyuncs.com/apps/anthropic".to_string(),
+            ..config.clone()
+        };
         assert_eq!(resolve_endpoint(&dashscope), "https://dashscope-intl.aliyuncs.com/apps/anthropic/v1/messages");
         assert_eq!(
             resolve_model_list_endpoint(&dashscope).unwrap(),
@@ -5917,6 +5983,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -5943,14 +6010,15 @@ mod tests {
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.minimax.io/v1/models");
         assert!(provider_requires_api_key(&config.provider));
 
-        let china = AiConfig { endpoint: "https://api.minimaxi.com/v1".to_string(), ..config.clone() };
+        let china =
+            AiConfig { max_output_tokens: None, endpoint: "https://api.minimaxi.com/v1".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&china), "https://api.minimaxi.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&china).unwrap(), "https://api.minimaxi.com/v1/models");
 
-        let no_key = AiConfig { api_key: String::new(), ..config.clone() };
+        let no_key = AiConfig { max_output_tokens: None, api_key: String::new(), ..config.clone() };
         assert_eq!(validate_config(&no_key).unwrap_err(), "API key is required");
 
-        let responses = AiConfig { api_style: AiApiStyle::Responses, ..config.clone() };
+        let responses = AiConfig { max_output_tokens: None, api_style: AiApiStyle::Responses, ..config.clone() };
         assert_eq!(
             validate_config(&responses).unwrap_err(),
             "MiniMax currently supports the Chat Completions API style in DBX; select Completions and retry"
@@ -5964,6 +6032,7 @@ mod tests {
     #[test]
     fn kimi_provider_uses_openai_compatible_endpoints_and_requires_an_api_key() {
         let config = AiConfig {
+            max_output_tokens: None,
             provider: AiProvider::Kimi,
             api_key: "key".to_string(),
             auth_method: AiAuthMethod::Bearer,
@@ -6001,6 +6070,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6025,25 +6095,31 @@ mod tests {
         assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.example.com/v1/models");
 
         // Endpoint with /v1 already present — no change
-        let config_v1 = AiConfig { endpoint: "https://api.example.com/v1".to_string(), ..config.clone() };
+        let config_v1 =
+            AiConfig { max_output_tokens: None, endpoint: "https://api.example.com/v1".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&config_v1), "https://api.example.com/v1/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&config_v1).unwrap(), "https://api.example.com/v1/models");
 
         // Endpoint with /v2 — no change
-        let config_v2 = AiConfig { endpoint: "https://api.example.com/v2".to_string(), ..config.clone() };
+        let config_v2 =
+            AiConfig { max_output_tokens: None, endpoint: "https://api.example.com/v2".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&config_v2), "https://api.example.com/v2/chat/completions");
 
         // Full path already specified — no change
-        let config_full =
-            AiConfig { endpoint: "https://api.openai.com/v1/chat/completions".to_string(), ..config.clone() };
+        let config_full = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            ..config.clone()
+        };
         assert_eq!(resolve_endpoint(&config_full), "https://api.openai.com/v1/chat/completions");
 
         // Responses API style with /v1 missing
-        let config_responses = AiConfig { api_style: AiApiStyle::Responses, ..config.clone() };
+        let config_responses = AiConfig { max_output_tokens: None, api_style: AiApiStyle::Responses, ..config.clone() };
         assert_eq!(resolve_endpoint(&config_responses), "https://api.example.com/v1/responses");
 
         // Ollama preset already has /v1 — no change
         let ollama = AiConfig {
+            max_output_tokens: None,
             provider: AiProvider::Ollama,
             endpoint: "http://localhost:11434/v1".to_string(),
             ..config.clone()
@@ -6051,12 +6127,14 @@ mod tests {
         assert_eq!(resolve_endpoint(&ollama), "http://localhost:11434/v1/chat/completions");
 
         // Custom path without /v1 — left alone (CC-Switch strategy: only bare origin gets auto /v1)
-        let custom_path = AiConfig { endpoint: "https://my-gateway.com/api".to_string(), ..config.clone() };
+        let custom_path =
+            AiConfig { max_output_tokens: None, endpoint: "https://my-gateway.com/api".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&custom_path), "https://my-gateway.com/api/chat/completions");
         assert_eq!(resolve_model_list_endpoint(&custom_path).unwrap(), "https://my-gateway.com/api/models");
 
         // Bare host with port — add /v1
-        let bare_with_port = AiConfig { endpoint: "http://localhost:8080".to_string(), ..config.clone() };
+        let bare_with_port =
+            AiConfig { max_output_tokens: None, endpoint: "http://localhost:8080".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&bare_with_port), "http://localhost:8080/v1/chat/completions");
     }
 
@@ -6075,6 +6153,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6099,6 +6178,7 @@ mod tests {
         assert_eq!(resolve_endpoint(&config), "https://api.openai.com/v1/responses");
 
         let completions = AiConfig {
+            max_output_tokens: None,
             endpoint: "https://api.openai.com/v1/responses".to_string(),
             api_style: AiApiStyle::Completions,
             custom_headers: Default::default(),
@@ -6122,6 +6202,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6292,6 +6373,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6314,7 +6396,8 @@ mod tests {
         };
         assert_eq!(resolve_ollama_show_endpoint(&config).unwrap(), "http://localhost:11434/api/show");
 
-        let prefixed = AiConfig { endpoint: "https://example.com/ollama/v1".to_string(), ..config };
+        let prefixed =
+            AiConfig { max_output_tokens: None, endpoint: "https://example.com/ollama/v1".to_string(), ..config };
         assert_eq!(resolve_ollama_show_endpoint(&prefixed).unwrap(), "https://example.com/ollama/api/show");
     }
 
@@ -6335,6 +6418,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6427,6 +6511,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6461,10 +6546,15 @@ mod tests {
 
     #[test]
     fn responses_api_clamps_tiny_output_token_requests() {
-        assert_eq!(responses_max_output_tokens(Some(1)), 16);
-        assert_eq!(responses_max_output_tokens(Some(16)), 16);
-        assert_eq!(responses_max_output_tokens(Some(2400)), 2400);
-        assert_eq!(responses_max_output_tokens(None), 2048);
+        let mut config = minimax_test_config("https://api.minimaxi.com/v1");
+        assert_eq!(responses_max_output_tokens(Some(1), &config), 16);
+        assert_eq!(responses_max_output_tokens(Some(16), &config), 16);
+        assert_eq!(responses_max_output_tokens(Some(2400), &config), 2400);
+        assert_eq!(responses_max_output_tokens(None, &config), 2048);
+
+        config.max_output_tokens = Some(32_768);
+        assert_eq!(responses_max_output_tokens(None, &config), 32_768);
+        assert_eq!(responses_max_output_tokens(Some(2400), &config), 2400);
     }
 
     #[test]
@@ -6679,6 +6769,9 @@ mod tests {
         assert!(is_kimi_model("kimi-k2.6"));
         assert!(is_kimi_model("kimi-k2.5"));
         assert!(is_kimi_model("kimi-k3"));
+        assert!(is_kimi_model("K3"));
+        assert!(is_kimi_model("kimi-for-coding"));
+        assert!(is_kimi_model("kimi-for-coding-highspeed"));
 
         // Older K2 variants should not skip OpenAI-compatible thinking toggles.
         assert!(!is_kimi_model("kimi-k2"));
@@ -6702,6 +6795,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6728,7 +6822,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_tokens").is_none());
@@ -6739,7 +6833,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_completion_tokens").is_none());
@@ -6751,7 +6845,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_tokens").is_none());
@@ -6764,10 +6858,19 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_completion_tokens").is_none());
+
+        config.max_output_tokens = Some(32_768);
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, None);
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(32_768)));
     }
 
     #[test]
@@ -6910,8 +7013,8 @@ mod tests {
     }
 
     #[test]
-    fn omits_extra_body_for_kimi_test_connection_body() {
-        let config = AiConfig {
+    fn omits_extra_body_for_kimi_model_aliases() {
+        let mut config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
             api_key: "key".to_string(),
             auth_method: AiAuthMethod::Bearer,
@@ -6924,6 +7027,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -6944,17 +7048,20 @@ mod tests {
             qoder_cli_path: None,
             qoder_cli_env: Default::default(),
         };
-        let mut body = serde_json::json!({
-            "model": &config.model,
-            "messages": [{ "role": "user", "content": TEST_PROMPT }],
-            "max_tokens": 16,
-            "stream": true,
-        });
+        for model in ["kimi-k2.5", "K3", "kimi-for-coding", "kimi-for-coding-highspeed"] {
+            config.model = model.to_string();
+            let mut body = serde_json::json!({
+                "model": &config.model,
+                "messages": [{ "role": "user", "content": TEST_PROMPT }],
+                "max_tokens": 16,
+                "stream": true,
+            });
 
-        apply_chat_completion_thinking_toggle(&mut body, &config);
+            apply_chat_completion_thinking_toggle(&mut body, &config);
 
-        assert!(body.get("extra_body").is_none());
-        assert!(body.get("reasoning_effort").is_none());
+            assert!(body.get("extra_body").is_none(), "{model}");
+            assert!(body.get("reasoning_effort").is_none(), "{model}");
+        }
     }
 
     #[test]
@@ -6972,6 +7079,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -7026,6 +7134,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -7074,6 +7183,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -7109,7 +7219,7 @@ mod tests {
         config.enable_thinking = false;
         let mut body = serde_json::json!({ "model": &config.model });
 
-        decorate_chat_completion_body(&mut body, &config, 1024);
+        decorate_chat_completion_body(&mut body, &config, Some(1024));
 
         assert_eq!(body["reasoning_split"], true);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -7466,6 +7576,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::High,
+            max_output_tokens: None,
             runtime_effort: Some(AiEffortSelection::ProviderDefault),
             context_window: None,
             max_retries: None,
@@ -7541,6 +7652,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,
@@ -7611,6 +7723,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
+            max_output_tokens: None,
             runtime_effort: None,
             context_window: None,
             max_retries: None,

@@ -32,6 +32,7 @@ import {
   Search,
   Settings,
   Sun,
+  Star,
   SunMoon,
   Terminal,
   Trash2,
@@ -40,6 +41,7 @@ import {
 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
@@ -54,6 +56,8 @@ import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
+  AI_OUTPUT_TOKENS_MAX,
+  AI_OUTPUT_TOKENS_MIN,
   EDITOR_THEMES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
@@ -88,8 +92,10 @@ import {
   type TabPlacement,
   type TabSortMode,
   type UpdateDownloadSource,
+  type CsvQuoteMode,
   type CustomThemeColors,
   type CustomTheme,
+  type McpConnectionPolicy,
   type ClickTableNavigationTarget,
   type SqlCompletionTriggerMode,
   SIDEBAR_INDENT_MIN,
@@ -206,6 +212,7 @@ import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
 import type { PromptTemplate } from "@/types/promptTemplate";
 import { GLOBAL_INSTRUCTIONS_MAX, PROMPT_TEMPLATE_CONTENT_MAX, PROMPT_TEMPLATE_NAME_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
 import { METADATA_CACHE_HARD_MAX_MEMORY_MB, METADATA_CACHE_MIN_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
+import { databaseManifestEntry, manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -540,9 +547,11 @@ const editSidebarCopyTableNameIncludeSchema = ref(settingsStore.editorSettings.s
 const editRedisKeyTemplates = ref(normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n"));
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
+const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
+const editCsvQuoteMode = ref<CsvQuoteMode>(settingsStore.editorSettings.csvQuoteMode);
 const editGlobalDateTimeDisplayFormat = ref(settingsStore.editorSettings.globalDateTimeDisplayFormat);
 const editGlobalDateTimeExportFormat = ref(settingsStore.editorSettings.globalDateTimeExportFormat);
 const editGlobalDateTimeImportFormat = ref(settingsStore.editorSettings.globalDateTimeImportFormat);
@@ -685,6 +694,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
+    sidebarShowTooltips: editSidebarShowTooltips.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
@@ -692,6 +702,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     sidebarCopyTableNameIncludeSchema: editSidebarCopyTableNameIncludeSchema.value,
     redisKeyTemplates: normalizeRedisKeyTemplates(editRedisKeyTemplates.value),
     exportBatchSize: editExportBatchSize.value,
+    csvQuoteMode: editCsvQuoteMode.value,
     globalDateTimeDisplayFormat: editGlobalDateTimeDisplayFormat.value,
     globalDateTimeExportFormat: editGlobalDateTimeExportFormat.value,
     globalDateTimeImportFormat: editGlobalDateTimeImportFormat.value,
@@ -1092,9 +1103,11 @@ function syncEditorSettingsDraftFromStore() {
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n");
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
+  editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
+  editCsvQuoteMode.value = settingsStore.editorSettings.csvQuoteMode;
   editGlobalDateTimeDisplayFormat.value = settingsStore.editorSettings.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = settingsStore.editorSettings.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = settingsStore.editorSettings.globalDateTimeImportFormat;
@@ -1355,6 +1368,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+    editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
     editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
@@ -1390,6 +1404,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(DEFAULT_EDITOR_SETTINGS.tableColumnTemplateFields);
     editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
     editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
+    editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
     editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
     editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
     editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -1491,6 +1506,7 @@ function resetAllDefaults() {
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+  editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
@@ -1498,6 +1514,7 @@ function resetAllDefaults() {
   editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(DEFAULT_EDITOR_SETTINGS.redisKeyTemplates).join("\n");
   editExportBatchSize.value = DEFAULT_EDITOR_SETTINGS.exportBatchSize;
+  editCsvQuoteMode.value = DEFAULT_EDITOR_SETTINGS.csvQuoteMode;
   editGlobalDateTimeDisplayFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeDisplayFormat;
   editGlobalDateTimeExportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeExportFormat;
   editGlobalDateTimeImportFormat.value = DEFAULT_EDITOR_SETTINGS.globalDateTimeImportFormat;
@@ -1921,6 +1938,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
+  mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
 
@@ -2214,7 +2232,16 @@ async function saveMcpPolicy(partial: {
   allowDangerousSql?: boolean;
   allowedConnectionIds?: string[] | null;
   allowedToolNames?: string[] | null;
-  connectionPolicies?: { connectionId: string; readOnly: boolean; allowDangerousSql: boolean; executionModeConfigured: boolean; databaseScope: "all" | "selected" | "none"; allowedDatabases: string[] }[];
+  connectionPolicies?: {
+    connectionId: string;
+    readOnly: boolean;
+    allowDangerousSql: boolean;
+    executionModeConfigured: boolean;
+    executionModePolicyVersion: number | null;
+    databaseScope: "all" | "selected" | "none";
+    allowedDatabases: string[];
+    databasePolicies: { databaseName: string; readOnly: boolean; allowDangerousSql: boolean }[];
+  }[];
   queryTimeoutSecs?: number | null;
 }) {
   if (mcpPolicyControlsDisabled.value) return;
@@ -2267,6 +2294,8 @@ const mcpToolOptions = [
   { name: "dbx_list_databases", labelKey: "settings.mcpToolListDatabases" },
   { name: "dbx_list_tables", labelKey: "settings.mcpToolListTables" },
   { name: "dbx_describe_table", labelKey: "settings.mcpToolDescribeTable" },
+  { name: "dbx_list_routines", labelKey: "settings.mcpToolListRoutines" },
+  { name: "dbx_get_routine_source", labelKey: "settings.mcpToolGetRoutineSource" },
   { name: "dbx_get_schema_context", labelKey: "settings.mcpToolGetSchemaContext" },
   { name: "dbx_execute_query", labelKey: "settings.mcpToolExecuteQuery" },
   { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },
@@ -2322,16 +2351,87 @@ function mcpConnectionExecutionMode(connectionId: string): McpConnectionExecutio
   return rule.allowDangerousSql ? "high_risk_write" : "safe_write";
 }
 
+function mcpExecutionModeRank(mode: McpConnectionExecutionMode): number {
+  return mode === "read_only" ? 0 : mode === "safe_write" ? 1 : 2;
+}
+
+function migrateLegacyMcpConnectionPolicy(policy: McpConnectionPolicy) {
+  const connectionMode = mcpConnectionExecutionMode(policy.connectionId);
+  const legacyMode = connectionMode === "inherit" ? mcpExecutionMode.value : connectionMode;
+  const effectiveMode = mcpExecutionModeRank(legacyMode) < mcpExecutionModeRank(mcpExecutionMode.value) ? legacyMode : mcpExecutionMode.value;
+  const databasePolicies = policy.databasePolicies.map((databasePolicy) => {
+    const databaseMode: McpConnectionExecutionMode = databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
+    const effectiveDatabaseMode = mcpExecutionModeRank(databaseMode) < mcpExecutionModeRank(effectiveMode) ? databaseMode : effectiveMode;
+    return {
+      ...databasePolicy,
+      readOnly: effectiveDatabaseMode === "read_only",
+      allowDangerousSql: effectiveDatabaseMode === "high_risk_write",
+    };
+  });
+  return {
+    readOnly: effectiveMode === "read_only",
+    allowDangerousSql: effectiveMode === "high_risk_write",
+    executionModeConfigured: true,
+    databasePolicies,
+  };
+}
+
+function mcpExecutionModeLabel(mode: McpConnectionExecutionMode): string {
+  return t(mode === "read_only" ? "settings.mcpExecutionModeReadOnly" : mode === "safe_write" ? "settings.mcpExecutionModeSafeWrite" : "settings.mcpExecutionModeHighRiskWrite");
+}
+
+function mcpEffectiveExecutionMode(connectionMode: McpConnectionExecutionMode | "inherit", databaseMode: McpConnectionExecutionMode | "inherit"): McpConnectionExecutionMode {
+  return databaseMode !== "inherit" ? databaseMode : connectionMode !== "inherit" ? connectionMode : mcpExecutionMode.value;
+}
+
+const mcpPermissionPreviewSearchQuery = ref("");
+const mcpPermissionPreviewRows = computed(() =>
+  mcpConnectionPolicyConnections.value.flatMap((connection) => {
+    const rule = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connection.id);
+    const connectionMode = mcpConnectionExecutionMode(connection.id);
+    if (rule?.databaseScope === "none") return [];
+    const databases = rule?.databaseScope === "selected" ? rule.allowedDatabases : [t("settings.mcpDatabaseScopeSummaryAll")];
+    return databases.map((database) => {
+      const databasePolicy = rule?.databasePolicies.find((item) => item.databaseName === database);
+      const databaseMode: McpConnectionExecutionMode | "inherit" = !databasePolicy ? "inherit" : databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
+      return {
+        connection: connection.name,
+        database,
+        connectionMode,
+        databaseMode,
+        effectiveMode: mcpEffectiveExecutionMode(connectionMode, databaseMode),
+      };
+    });
+  }),
+);
+const filteredMcpPermissionPreviewRows = computed(() => {
+  const query = mcpPermissionPreviewSearchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return mcpPermissionPreviewRows.value;
+  return mcpPermissionPreviewRows.value.filter((row) => [row.connection, row.database].some((value) => value.toLocaleLowerCase().includes(query)));
+});
+
 function onMcpConnectionExecutionModeChange(connectionId: string, mode: McpConnectionExecutionMode | "inherit") {
   const existing = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connectionId);
   const rules = settingsStore.mcpGlobalPolicy.connectionPolicies.filter((item) => item.connectionId !== connectionId);
+  const migrated = existing && existing.executionModePolicyVersion !== 1 ? migrateLegacyMcpConnectionPolicy(existing) : null;
+  const selectedMode =
+    migrated && mode === "inherit"
+      ? migrated
+      : {
+          readOnly: mode === "read_only",
+          allowDangerousSql: mode === "high_risk_write",
+          executionModeConfigured: mode !== "inherit",
+          databasePolicies: migrated?.databasePolicies ?? existing?.databasePolicies ?? [],
+        };
   const next = {
     connectionId,
-    readOnly: mode === "read_only",
-    allowDangerousSql: mode === "high_risk_write",
-    executionModeConfigured: mode !== "inherit",
+    readOnly: selectedMode.readOnly,
+    allowDangerousSql: selectedMode.allowDangerousSql,
+    executionModeConfigured: selectedMode.executionModeConfigured,
+    executionModePolicyVersion: 1,
     databaseScope: existing?.databaseScope ?? ("all" as const),
     allowedDatabases: existing?.allowedDatabases ?? [],
+    databasePolicies: selectedMode.databasePolicies,
   };
   if (next.executionModeConfigured || next.databaseScope !== "all") rules.push(next);
   void saveMcpPolicy({ connectionPolicies: rules });
@@ -3266,12 +3366,37 @@ async function saveTemplateForm() {
 async function confirmDeleteTemplate(tpl: PromptTemplate) {
   try {
     await promptTemplateStore.remove(tpl.id);
+    // Keep the per-db_type default/last-used records free of the deleted id.
+    settingsStore.removeTemplateFromDefaultAndLastUsed(tpl.id);
     toast(t("ai.promptTemplateDeleted"));
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
     templateDeleteConfirm.value = null;
   }
+}
+
+// Per-db_type default templates (issue #7649): a template can be marked as the
+// auto-applied default for any database type; the AI panel resolves these on
+// mount/namespace switch. Stored in the AI chat selection, not on the template row.
+const templateDefaultsOpenId = ref("");
+const dbTypeOptions = manifestDatabaseTypes();
+function defaultDbTypesForTemplate(templateId: string): string[] {
+  return Object.entries(settingsStore.aiDefaultTemplatesByDbType)
+    .filter(([, ids]) => ids.includes(templateId))
+    .map(([dbType]) => dbType)
+    .sort();
+}
+function templateHasDefault(dbType: string, templateId: string): boolean {
+  return settingsStore.aiDefaultTemplatesByDbType[dbType]?.includes(templateId) ?? false;
+}
+function toggleTemplateDefault(dbType: string, templateId: string) {
+  const current = settingsStore.aiDefaultTemplatesByDbType[dbType] ?? [];
+  const next = current.includes(templateId) ? current.filter((id) => id !== templateId) : [...current, templateId];
+  settingsStore.setDefaultTemplatesForDbType(dbType, next);
+}
+function dbTypeLabel(dbType: string): string {
+  return databaseManifestEntry(dbType as DatabaseType)?.label ?? dbType;
 }
 
 async function saveGlobalInstructions() {
@@ -3401,6 +3526,7 @@ const aiEditProxyEnabled = ref(false);
 const aiEditProxyUrl = ref("");
 const aiEditEnableThinking = ref(true);
 const aiEditReasoningLevel = ref<AiReasoningLevel>("default");
+const aiEditMaxOutputTokens = ref<number | undefined>(undefined);
 const aiEditContextWindow = ref<number | undefined>(undefined);
 const aiEditCodexCliPath = ref("");
 const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
@@ -3685,6 +3811,7 @@ function currentAiEditConfig() {
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
     reasoningLevel: aiEditReasoningLevel.value,
+    maxOutputTokens: aiEditMaxOutputTokens.value || undefined,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
     codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
@@ -3771,6 +3898,7 @@ function aiEnterEditMode(configId?: string) {
       aiEditProxyUrl.value = config.proxyUrl ?? "";
       aiEditEnableThinking.value = config.enableThinking ?? true;
       aiEditReasoningLevel.value = config.reasoningLevel ?? "default";
+      aiEditMaxOutputTokens.value = config.maxOutputTokens;
       aiEditContextWindow.value = config.contextWindow;
       aiEditCodexCliPath.value = config.codexCliPath ?? "";
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
@@ -3804,6 +3932,7 @@ function aiEnterEditMode(configId?: string) {
     aiEditProxyUrl.value = "";
     aiEditEnableThinking.value = true;
     aiEditReasoningLevel.value = "default";
+    aiEditMaxOutputTokens.value = undefined;
     aiEditContextWindow.value = undefined;
     aiEditCodexCliPath.value = "";
     aiEditCodexCliEnvRows.value = [];
@@ -5763,6 +5892,17 @@ onUnmounted(() => {
                 <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-show-tooltips">
+                    {{ t("settings.sidebarShowTooltips") }}
+                  </Label>
+                  <HelpTooltip :label="t('settings.sidebarShowTooltips')">
+                    {{ t("settings.sidebarShowTooltipsDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-show-tooltips" v-model="editSidebarShowTooltips" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-indent">{{ t("settings.sidebarIndent") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6389,6 +6529,23 @@ onUnmounted(() => {
               <div class="space-y-3">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.exportSection") }}
+                </div>
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0 space-y-0.5">
+                    <Label for="csv-quote-mode">{{ t("settings.csvQuoteMode") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.csvQuoteModeDescription") }}
+                    </p>
+                  </div>
+                  <Select v-model="editCsvQuoteMode">
+                    <SelectTrigger id="csv-quote-mode" class="h-8 w-44 shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{{ t("settings.csvQuoteModeAll") }}</SelectItem>
+                      <SelectItem value="necessary">{{ t("settings.csvQuoteModeNecessary") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div class="space-y-2">
                   <Label>{{ t("settings.exportBatchSize") }}</Label>
@@ -7226,8 +7383,34 @@ onUnmounted(() => {
                         {{ tpl.name }}
                       </div>
                       <div class="text-xs text-muted-foreground truncate">{{ tpl.content.slice(0, 100) }}{{ tpl.content.length > 100 ? "..." : "" }}</div>
+                      <div v-if="defaultDbTypesForTemplate(tpl.id).length > 0" class="mt-1 flex flex-wrap gap-1">
+                        <Badge v-for="dbType in defaultDbTypesForTemplate(tpl.id)" :key="dbType" variant="secondary" class="px-1.5 py-0 text-[10px]">
+                          {{ dbTypeLabel(dbType) }}
+                        </Badge>
+                      </div>
                     </div>
                     <div class="flex items-center gap-1 shrink-0 ml-2">
+                      <Popover :open="templateDefaultsOpenId === tpl.id" @update:open="(open) => (templateDefaultsOpenId = open ? tpl.id : '')">
+                        <PopoverTrigger as-child>
+                          <Button type="button" size="sm" variant="ghost" :class="defaultDbTypesForTemplate(tpl.id).length > 0 ? 'text-amber-500' : ''" :title="t('ai.templateSetDefault')" :aria-label="t('ai.templateSetDefault')">
+                            <Star class="h-3.5 w-3.5" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent align="end" class="w-60 p-2">
+                          <p class="mb-1 px-1 text-xs font-medium">{{ t("ai.templateDefaultsTitle") }}</p>
+                          <div class="max-h-48 overflow-auto">
+                            <button v-for="dbType in dbTypeOptions" :key="dbType" type="button" class="flex w-full items-center gap-2 rounded-sm px-1 py-1 text-xs hover:bg-muted" @click="toggleTemplateDefault(dbType, tpl.id)">
+                              <div class="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border" :class="templateHasDefault(dbType, tpl.id) ? 'border-primary bg-primary text-primary-foreground' : ''">
+                                <Check v-if="templateHasDefault(dbType, tpl.id)" class="h-3 w-3" />
+                              </div>
+                              {{ dbTypeLabel(dbType) }}
+                            </button>
+                          </div>
+                          <p v-if="defaultDbTypesForTemplate(tpl.id).length === 0" class="mt-1 px-1 text-[10px] text-muted-foreground">
+                            {{ t("ai.templateDefaultsEmpty") }}
+                          </p>
+                        </PopoverContent>
+                      </Popover>
                       <Button type="button" size="sm" variant="ghost" @click="openEditTemplate(tpl)">{{ t("common.edit") }}</Button>
                       <Button type="button" size="sm" variant="ghost" class="text-destructive" @click="templateDeleteConfirm = tpl">{{ t("common.delete") }}</Button>
                     </div>
@@ -7558,6 +7741,16 @@ onUnmounted(() => {
                     </p>
                   </div>
                 </div>
+                <!-- Maximum Output Tokens -->
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.maxOutputTokens") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model.number="aiEditMaxOutputTokens" type="number" :min="AI_OUTPUT_TOKENS_MIN" :max="AI_OUTPUT_TOKENS_MAX" step="1000" class="h-8 text-xs" :placeholder="t('ai.maxOutputTokensAuto')" />
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("ai.maxOutputTokensHint", { min: AI_OUTPUT_TOKENS_MIN, max: AI_OUTPUT_TOKENS_MAX }) }}
+                    </p>
+                  </div>
+                </div>
 
                 <!-- Proxy -->
                 <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
@@ -7877,6 +8070,7 @@ onUnmounted(() => {
                       :connections="mcpSelectableConnections"
                       :allowed-connection-ids="mcpAllowedConnectionIds"
                       :connection-policies="settingsStore.mcpGlobalPolicy.connectionPolicies"
+                      :global-execution-mode="mcpExecutionMode"
                       :disabled="mcpPolicyControlsDisabled"
                       :busy="mcpPolicyLoading || mcpPolicySaving"
                       @update:connection-policies="onMcpConnectionPoliciesChange"
@@ -7927,6 +8121,44 @@ onUnmounted(() => {
                   </template>
                   <template #capabilities>
                     <div class="space-y-4">
+                      <section class="space-y-2 rounded-md border bg-background p-3">
+                        <div>
+                          <p class="text-sm font-medium">{{ t("settings.mcpPermissionPreviewTitle") }}</p>
+                          <p class="text-xs text-muted-foreground">{{ t("settings.mcpPermissionPreviewDescription") }}</p>
+                        </div>
+                        <template v-if="mcpPermissionPreviewRows.length">
+                          <div class="relative">
+                            <Search class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                            <Input v-model="mcpPermissionPreviewSearchQuery" autocomplete="off" :placeholder="t('settings.mcpPermissionPreviewSearchPlaceholder')" class="h-8 pl-9 text-xs" />
+                          </div>
+                          <div class="max-h-72 overflow-auto overscroll-contain rounded border">
+                            <table class="w-full min-w-[42rem] border-separate border-spacing-0 text-xs">
+                              <thead class="text-muted-foreground">
+                                <tr>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewConnection") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewDatabase") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewConnectionDefault") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewDatabaseOverride") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewEffective") }}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr v-for="row in filteredMcpPermissionPreviewRows" :key="`${row.connection}:${row.database}`" class="border-t">
+                                  <td class="px-3 py-2 font-medium">{{ row.connection }}</td>
+                                  <td class="px-3 py-2 font-mono">{{ row.database }}</td>
+                                  <td class="px-3 py-2">{{ row.connectionMode === "inherit" ? t("settings.mcpConnectionPolicyInherit") : mcpExecutionModeLabel(row.connectionMode) }}</td>
+                                  <td class="px-3 py-2">{{ row.databaseMode === "inherit" ? t("settings.mcpDatabasePolicyInherit") : mcpExecutionModeLabel(row.databaseMode) }}</td>
+                                  <td class="px-3 py-2 font-medium">{{ mcpExecutionModeLabel(row.effectiveMode) }}</td>
+                                </tr>
+                                <tr v-if="filteredMcpPermissionPreviewRows.length === 0">
+                                  <td colspan="5" class="px-3 py-8 text-center text-muted-foreground">{{ t("settings.mcpPermissionPreviewSearchNoResults") }}</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </template>
+                        <p v-else class="text-xs text-muted-foreground">{{ t("settings.mcpPermissionPreviewEmpty") }}</p>
+                      </section>
                       <section class="space-y-2">
                         <div>
                           <p class="text-sm font-medium">{{ t("settings.mcpToolPermissionsTitle") }}</p>

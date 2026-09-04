@@ -445,6 +445,16 @@ function onObjectsScroll() {
   });
 }
 
+function flushObjectBrowserViewport() {
+  if (viewportFrame) {
+    window.cancelAnimationFrame(viewportFrame);
+    viewportFrame = 0;
+  }
+  const el = scrollerElement();
+  if (!el) return;
+  emitViewportChange(el.scrollTop);
+}
+
 function applyObjectBrowserScrollTop(scrollTop: number) {
   const scroller = activeScroller();
   if (scroller && !(scroller instanceof HTMLElement)) {
@@ -1436,6 +1446,7 @@ async function onEventSaved(savedName: string) {
 }
 
 async function openNewQuery(row: ObjectBrowserRow) {
+  flushObjectBrowserViewport();
   const schema = row.schema || selectedSchema.value;
   const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
   queryStore.updateSql(
@@ -2145,7 +2156,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
         executePage: (sql) => api.executeQuery(props.connection.id, props.database, sql),
       });
       if (format === "csv") {
-        await api.exportQueryResultCsv(filePath, result.columns, result.rows);
+        await api.exportQueryResultCsv(filePath, result.columns, result.rows, settingsStore.editorSettings.csvQuoteMode);
       } else {
         const comments = result.columns.map((name) => columnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
         const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -2183,6 +2194,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       tableName: row.name,
       filePath,
       format,
+      csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,
       autoFilter: format === "xlsx" ? autoFilter : undefined,
@@ -3845,8 +3857,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </DialogHeader>
       <div class="grid gap-3">
         <Input v-model="renameInput" :placeholder="t('contextMenu.renameObjectNamePlaceholder')" @keydown.enter.prevent="confirmRename" />
-        <pre v-if="renamePreviewSqlText" class="max-h-32 overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renamePreviewSqlText)"></pre>
-        <p v-if="renameError" class="text-sm text-destructive">{{ renameError }}</p>
+        <pre v-if="renamePreviewSqlText" class="max-h-32 min-w-0 max-w-full overflow-auto rounded bg-muted p-3 text-xs whitespace-pre-wrap" v-html="highlight(renamePreviewSqlText)"></pre>
+        <p v-if="renameError" class="min-w-0 max-w-full overflow-x-auto text-sm text-destructive">{{ renameError }}</p>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="showRenameDialog = false">{{ t("dangerDialog.cancel") }}</Button>

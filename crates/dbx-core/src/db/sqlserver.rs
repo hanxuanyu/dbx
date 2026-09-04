@@ -10,11 +10,13 @@ use sqlparser::dialect::MsSqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tiberius::{
-    AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser, TokenRow,
+    AuthMethod, Client, ColumnData, ColumnType, Config, FromSql, QueryItem, QueryStream, Row, SqlBrowser, ToSql,
+    TokenRow,
 };
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -24,7 +26,112 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
 use tracing_subscriber::Layer;
 
-pub type SqlServerClient = Client<Compat<TcpStream>>;
+type SqlServerTdsClient = Client<Compat<TcpStream>>;
+
+const SQLSERVER_ENGINE_EDITION_SQL: &str = "SELECT CAST(SERVERPROPERTY('EngineEdition') AS int) AS engine_edition";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SqlServerQueryTransport {
+    Unknown,
+    Rpc,
+    Batch,
+}
+
+pub struct SqlServerClient {
+    inner: SqlServerTdsClient,
+    query_transport: SqlServerQueryTransport,
+}
+
+impl SqlServerClient {
+    fn new(inner: SqlServerTdsClient) -> Self {
+        Self { inner, query_transport: SqlServerQueryTransport::Unknown }
+    }
+
+    async fn ensure_query_transport(&mut self) -> SqlServerQueryTransport {
+        if self.query_transport != SqlServerQueryTransport::Unknown {
+            return self.query_transport;
+        }
+
+        let transport = match self.inner.simple_query(SQLSERVER_ENGINE_EDITION_SQL).await {
+            Ok(stream) => match stream.into_row().await {
+                Ok(Some(row)) => sqlserver_query_transport_for_engine_edition(sqlserver_engine_edition_from_row(&row)),
+                Ok(None) => {
+                    log::debug!("SQL Server EngineEdition probe returned no rows; keeping RPC query transport");
+                    SqlServerQueryTransport::Rpc
+                }
+                Err(error) => {
+                    log::debug!("SQL Server EngineEdition probe failed while reading the row: {error}");
+                    SqlServerQueryTransport::Rpc
+                }
+            },
+            Err(error) => {
+                log::debug!("SQL Server EngineEdition probe failed: {error}");
+                SqlServerQueryTransport::Rpc
+            }
+        };
+        self.query_transport = transport;
+        transport
+    }
+
+    pub async fn query<'a, 'b>(
+        &'a mut self,
+        query: impl Into<Cow<'b, str>>,
+        params: &'b [&'b dyn ToSql],
+    ) -> tiberius::Result<QueryStream<'a>>
+    where
+        'a: 'b,
+    {
+        let query = query.into();
+        let transport =
+            if params.is_empty() { self.ensure_query_transport().await } else { SqlServerQueryTransport::Rpc };
+        if sqlserver_query_transport_for_request(transport, params.len()) == SqlServerQueryTransport::Batch {
+            self.inner.simple_query(query).await
+        } else {
+            self.inner.query(query, params).await
+        }
+    }
+}
+
+impl Deref for SqlServerClient {
+    type Target = SqlServerTdsClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for SqlServerClient {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+fn sqlserver_query_transport_for_engine_edition(engine_edition: Option<i32>) -> SqlServerQueryTransport {
+    match engine_edition {
+        Some(6 | 11) => SqlServerQueryTransport::Batch,
+        _ => SqlServerQueryTransport::Rpc,
+    }
+}
+
+fn sqlserver_query_transport_for_request(
+    transport: SqlServerQueryTransport,
+    parameter_count: usize,
+) -> SqlServerQueryTransport {
+    if parameter_count == 0 {
+        transport
+    } else {
+        SqlServerQueryTransport::Rpc
+    }
+}
+
+fn sqlserver_engine_edition_from_row(row: &Row) -> Option<i32> {
+    row.try_get::<i32, _>(0)
+        .ok()
+        .flatten()
+        .or_else(|| row.try_get::<i64, _>(0).ok().flatten().and_then(|value| i32::try_from(value).ok()))
+        .or_else(|| row.try_get::<&str, _>(0).ok().flatten().and_then(|value| value.trim().parse::<i32>().ok()))
+}
+
 pub const SQLSERVER_DRIVER_PANIC_ERROR_PREFIX: &str = "SQL Server driver panic:";
 pub const SQLSERVER_LEGACY_DRIVER_PROFILE: &str = "sqlserver-legacy";
 pub const SQLSERVER_LEGACY_DRIVER_LABEL: &str = "SQL Server legacy compatibility component";
@@ -49,7 +156,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         DECLARE @dbx_probe_object nvarchar(258) = N'tempdb..' + QUOTENAME(@dbx_probe_table); \
         DECLARE @dbx_probe_sql nvarchar(max); \
         BEGIN TRY \
-            SET @dbx_probe_sql = @P4 + N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
+            SET @dbx_probe_sql = CAST(@P4 AS nvarchar(max)) + N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
                 N' FROM ' + @P3; \
             EXEC sys.sp_executesql @dbx_probe_sql; \
             SELECT c.name, TYPE_NAME(c.system_type_id) AS system_type_name, \
@@ -297,10 +404,11 @@ async fn try_connect(
             .map_err(|_| format!("SQL Server connection timed out ({}s)", timeout.as_secs()))?
             .map_err(|e| format!("SQL Server connection failed: {e}"))?
     };
-    tokio::time::timeout(timeout, Client::connect(config, tcp.compat_write()))
+    let client = tokio::time::timeout(timeout, Client::connect(config, tcp.compat_write()))
         .await
         .map_err(|_| format!("SQL Server handshake timed out ({}s)", timeout.as_secs()))?
-        .map_err(|e| format!("SQL Server connection failed: {e}"))
+        .map_err(|e| format!("SQL Server connection failed: {e}"))?;
+    Ok(SqlServerClient::new(client))
 }
 
 fn row_to_json(row: &tiberius::Row) -> Vec<serde_json::Value> {
@@ -2468,7 +2576,10 @@ fn sqlserver_list_tables_sql_with_kind(
             }
         })
         .unwrap_or_default();
-    let base_columns = "o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END, ep.value AS TABLE_COMMENT";
+    // The ROW_NUMBER pagination path wraps these projections in a derived table;
+    // SQL Server requires every derived-table column to have a name.
+    let base_columns =
+        "o.name, CASE WHEN o.type = 'V' THEN 'VIEW' ELSE 'BASE TABLE' END AS TABLE_TYPE, ep.value AS TABLE_COMMENT";
     let base_from = "FROM sys.objects o \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          OUTER APPLY (SELECT CAST(ep.value AS NVARCHAR(MAX)) AS value FROM sys.extended_properties ep \
@@ -3503,11 +3614,12 @@ mod tests {
         sqlserver_legacy_indexes_sql, sqlserver_legacy_probe, sqlserver_legacy_probe_with_nonce,
         sqlserver_legacy_wildcard_metadata_query, sqlserver_list_objects_sql, sqlserver_list_schemas_sql,
         sqlserver_list_tables_sql, sqlserver_probe_explicit_alias, sqlserver_query_messages,
+        sqlserver_query_transport_for_engine_edition, sqlserver_query_transport_for_request,
         sqlserver_schema_name_predicate, sqlserver_spatial_marker, sqlserver_supports_session_database_switch,
         sqlserver_table_comment_sql, sqlserver_table_objects_sql, sqlserver_triggers_sql,
         sqlserver_visible_object_predicate, strip_dbx_sqlserver_row_number_column, SqlServerDescribedColumn,
-        SqlServerProbeOutputNameOverride, SqlServerRestoredColumn, SqlServerResultSet, SqlServerSpatialColumn,
-        SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        SqlServerProbeOutputNameOverride, SqlServerQueryTransport, SqlServerRestoredColumn, SqlServerResultSet,
+        SqlServerSpatialColumn, SqlServerTdsEvent, SQLSERVER_COMPLETION_CONTEXT_SQL, SQLSERVER_RESULT_TYPE_PROBE_SQL,
     };
     use crate::types::{
         CompletionAssistantMatchMode, CompletionAssistantObjectKind, CompletionAssistantRequest, QueryResult,
@@ -3516,6 +3628,30 @@ mod tests {
     use chrono::NaiveDate;
     use std::{borrow::Cow, time::Instant};
     use tiberius::{Column, ColumnData, ColumnType, IntoSql};
+
+    #[test]
+    fn sqlserver_query_transport_detects_synapse_engine_editions() {
+        assert_eq!(sqlserver_query_transport_for_engine_edition(Some(6)), SqlServerQueryTransport::Batch);
+        assert_eq!(sqlserver_query_transport_for_engine_edition(Some(11)), SqlServerQueryTransport::Batch);
+        assert_eq!(sqlserver_query_transport_for_engine_edition(Some(3)), SqlServerQueryTransport::Rpc);
+        assert_eq!(sqlserver_query_transport_for_engine_edition(None), SqlServerQueryTransport::Rpc);
+    }
+
+    #[test]
+    fn sqlserver_query_transport_keeps_parameters_on_rpc_path() {
+        assert_eq!(
+            sqlserver_query_transport_for_request(SqlServerQueryTransport::Batch, 0),
+            SqlServerQueryTransport::Batch
+        );
+        assert_eq!(
+            sqlserver_query_transport_for_request(SqlServerQueryTransport::Rpc, 0),
+            SqlServerQueryTransport::Rpc
+        );
+        assert_eq!(
+            sqlserver_query_transport_for_request(SqlServerQueryTransport::Batch, 1),
+            SqlServerQueryTransport::Rpc
+        );
+    }
 
     #[test]
     fn sqlserver_bulk_token_row_owns_text_and_preserves_nulls() {
@@ -4460,6 +4596,14 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_table_objects_pagination_names_every_derived_column() {
+        let sql = sqlserver_table_objects_sql("dbo", None, Some(100), Some(100));
+
+        assert!(sql.contains("END AS TABLE_TYPE, ep.value AS TABLE_COMMENT"));
+        assert!(!sql.contains("END, ep.value AS TABLE_COMMENT"));
+    }
+
+    #[test]
     fn sqlserver_table_objects_sql_preserves_sidebar_probe_limits_above_1000() {
         let first_page = sqlserver_table_objects_sql("dbo", None, Some(1001), None);
         let next_page = sqlserver_table_objects_sql("dbo", None, Some(1001), Some(1000));
@@ -5398,11 +5542,26 @@ mod tests {
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("sys.dm_exec_describe_first_result_set"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("##dbx_result_type_probe_"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("SELECT TOP (0) * INTO"));
-        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("@P4 + N'SELECT TOP (0) * INTO"));
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("CAST(@P4 AS nvarchar(max)) + N'SELECT TOP (0) * INTO"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("N' FROM ' + @P3"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FROM tempdb.sys.columns"));
         assert!(!SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FMTONLY"));
         assert_eq!(SQLSERVER_RESULT_TYPE_PROBE_SQL.matches("SELECT @dbx_use_describe_dmv").count(), 1);
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_keeps_long_projection_text_untruncated() {
+        let aliases = (1..=136).map(|index| format!("[dbx_col_{index}]")).collect::<Vec<_>>().join(", ");
+        let source_sql = format!(
+            "(SELECT TOP (100) {} FROM [dbo].[ProjectInfo] WHERE ([PrjId] = N'123')) AS [dbx_probe_source]({aliases})",
+            (1..=136).map(|index| format!("[column_{index:03}]")).collect::<Vec<_>>().join(", "),
+        );
+
+        // SQL Server evaluates non-MAX concatenations left-to-right and caps
+        // nvarchar results at 4,000 characters. This is the shape reported in
+        // #7827; the explicit MAX cast must precede the dynamic source text.
+        assert!(source_sql.len() > 3_900);
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("CAST(@P4 AS nvarchar(max)) +"));
     }
 
     #[test]

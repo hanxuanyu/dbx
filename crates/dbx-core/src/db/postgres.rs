@@ -1413,12 +1413,34 @@ fn postgres_select_stream_outcome(stream: tokio_postgres::RowStream) -> Postgres
     PostgresSelectStreamOutcome::Binary { stream, metadata }
 }
 
+async fn prepare_unnamed_select_metadata(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+) -> Result<PreparedSelectMetadata, tokio_postgres::Error> {
+    // query_typed_raw sends Describe and Execute together. If its result has an
+    // unknown user-defined type, tokio-postgres then resolves that type with a
+    // second query on the same connection before returning the RowStream. A
+    // large result can fill the connection buffers and block that type lookup.
+    // Describe once without executing so custom types are cached before the
+    // actual unnamed stream starts. The stream remains unnamed to tolerate
+    // server-side prepared statement loss in snapshot/proxy environments.
+    let stmt = client.prepare(sql).await?;
+    Ok(prepared_select_metadata(stmt.columns()))
+}
+
 async fn start_postgres_select_stream(
     client: &deadpool_postgres::Client,
     sql: &str,
     force_unnamed: bool,
 ) -> Result<PostgresSelectStreamOutcome, tokio_postgres::Error> {
     if force_unnamed || postgres_client_uses_unnamed_statements(client) {
+        let metadata = prepare_unnamed_select_metadata(client, sql).await?;
+        if let Some(unsupported_type) = metadata.unsupported_type {
+            return Ok(PostgresSelectStreamOutcome::TextFallback {
+                column_types: metadata.column_types,
+                unsupported_type,
+            });
+        }
         return postgres_query_unnamed(client, sql).await.map(postgres_select_stream_outcome);
     }
 
@@ -2021,20 +2043,45 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
+    connect_with_max_connections(url, fallback_timeout, 10).await
+}
+
+/// Creates a PostgreSQL pool with an explicit checkout bound.
+///
+/// Session-scoped DBX pools use a single connection so temporary tables and
+/// other connection-local state cannot migrate between physical clients.
+pub async fn connect_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<Pool, String> {
     #[cfg(all(windows, target_vendor = "win7"))]
     {
-        connect_with_optional_local_timezone(url, fallback_timeout, None).await
+        connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, None, max_connections).await
     }
 
     #[cfg(not(all(windows, target_vendor = "win7")))]
     {
         let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-        connect_with_local_timezone(url, fallback_timeout, &timezone).await
+        connect_with_local_timezone_with_max_connections(url, fallback_timeout, &timezone, max_connections).await
     }
 }
 
+/// Test-only thin wrappers (the library now connects through
+/// `connect_with_max_connections`, which carries the pool bound).
+#[cfg(test)]
 async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
-    connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
+    connect_with_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: &str,
+    max_connections: usize,
+) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, Some(timezone), max_connections)
+        .await
 }
 
 /// Identity of one physical backend connection for notice attribution:
@@ -2225,23 +2272,33 @@ async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<Query
     }
 }
 
+#[cfg(test)]
 async fn connect_with_optional_local_timezone(
     url: &str,
     fallback_timeout: Duration,
     timezone: Option<&str>,
 ) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_optional_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: Option<&str>,
+    max_connections: usize,
+) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout).await;
+    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout, max_connections).await;
     let (pool, client) = match first_attempt {
         Err(error) if postgres_error_should_retry_without_tls(&error) => {
             let Some(fallback_url) = postgres_ssl_fallback_url(&url_with_keepalive) else {
                 return Err(error);
             };
             log::info!("PostgreSQL TLS handshake failed in sslmode=prefer; retrying without TLS");
-            connect_postgres_pool_attempt(&fallback_url, timeout).await?
+            connect_postgres_pool_attempt(&fallback_url, timeout, max_connections).await?
         }
         result => result?,
     };
@@ -2263,6 +2320,7 @@ async fn connect_with_optional_local_timezone(
 async fn connect_postgres_pool_attempt(
     url: &str,
     timeout: Duration,
+    max_connections: usize,
 ) -> Result<(Pool, deadpool_postgres::Client), String> {
     let postgres_url = postgres_connection_url(url)?;
     super::with_connection_timeout("PostgreSQL", timeout, async {
@@ -2298,7 +2356,7 @@ async fn connect_postgres_pool_attempt(
             )
         };
         let pool = Pool::builder(mgr)
-            .max_size(10)
+            .max_size(max_connections.max(1))
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(timeout))
             .create_timeout(Some(timeout))
@@ -13243,6 +13301,12 @@ mod tests {
         .expect("stream unnamed query inside backup snapshot");
         assert_eq!(columns, vec!["value"]);
         assert_eq!(rows[0][0], serde_json::json!(45));
+        let prepared_count = client
+            .query_typed_one("SELECT count(*)::int8 FROM pg_prepared_statements", &[])
+            .await
+            .expect("count server-side prepared statements")
+            .get::<_, i64>(0);
+        assert_eq!(prepared_count, 0, "snapshot stream metadata preparation must not retain a named statement");
         client.execute_typed("SELECT 1", &[]).await.expect("snapshot remains usable");
         client.execute_typed("ROLLBACK", &[]).await.expect("rollback backup snapshot");
     }

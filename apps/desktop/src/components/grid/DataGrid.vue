@@ -6,6 +6,7 @@ import {
   ArrowDown,
   ArrowUpDown,
   ArrowUpRight,
+  ExternalLink,
   Download,
   FileUp,
   Trash2,
@@ -96,7 +97,7 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructur
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
-import { compactHeaderColumnType, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import {
@@ -135,6 +136,7 @@ import {
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
 import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
+import { cellExternalUrl } from "@/lib/dataGrid/cellExternalUrl";
 import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
 import "@/lib/dataGrid/geometryMapPreview";
 import {
@@ -515,6 +517,8 @@ interface DataGridProps {
   }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
+  manualTransactionSessionId?: string;
+  onManualTransactionMutation?: () => void;
   mongoUpdateTarget?: MongoCopyUpdateTarget;
   queryEditabilityReason?: QueryEditabilityReason;
   allowInsertRows?: boolean;
@@ -564,6 +568,7 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
+  changeQueryTimeout: [connectionId: string];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -668,14 +673,15 @@ const columnTypeMap = computed(() => {
   const map = new Map<string, string>();
   if (props.tableMeta?.columns) {
     for (const col of props.tableMeta.columns) {
-      const typeName = shortTypeName(col.data_type);
-      // Add precision for numeric/decimal types
-      if (col.numeric_precision != null && ["numeric", "decimal"].includes(col.data_type.toLowerCase())) {
-        const scale = col.numeric_scale ?? 0;
-        map.set(col.name, `${typeName}(${col.numeric_precision},${scale})`);
-      } else {
-        map.set(col.name, typeName);
-      }
+      map.set(
+        col.name,
+        formatMetadataColumnTypeLabel({
+          dataType: shortTypeName(col.data_type),
+          characterMaximumLength: col.character_maximum_length,
+          numericPrecision: col.numeric_precision,
+          numericScale: col.numeric_scale,
+        }),
+      );
     }
   }
   return map;
@@ -4267,6 +4273,8 @@ const editor = useDataGridEditor({
   canEditExistingRows,
   onExecuteSql: computed(() => props.onExecuteSql),
   customSaveHandler: computed(() => props.customSaveHandler),
+  manualTransactionSessionId: computed(() => props.manualTransactionSessionId),
+  onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,
@@ -5776,6 +5784,7 @@ const {
   restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
+  columnIsExclusivelySelected,
   selectedRangeStart,
   selectedRowIds,
   selectedColumnIndexes,
@@ -6965,6 +6974,7 @@ async function applyOrderBySearch() {
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByClause,
+      injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
@@ -7004,6 +7014,7 @@ async function applyWhereFilter() {
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
+      injectDefaultTimeSeriesWhere: true,
       whereInput,
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
@@ -7884,8 +7895,9 @@ const canvasDetailButtonCell = computed(() => {
   const visibleRight = viewportWidth > 0 ? Math.min(viewportWidth, rect.left + rect.width) : rect.left + rect.width;
   const canQuickDownload = canQuickDownloadCellValue(target.rowIndex, target.col);
   const foreignKey = canvasCellForeignKey(target.rowIndex, target.col);
-  if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey) return null;
-  const minWidth = canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value) + 2;
+  const externalUrl = cellExternalUrl(displayItemAt(target.rowIndex)?.data[target.col]);
+  if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey && !externalUrl) return null;
+  const minWidth = canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value, !!externalUrl) + 2;
   if (rect.top < 0 || rect.top > viewportHeight - 1 || visibleRight - visibleLeft < minWidth) return null;
   return {
     rowIndex: target.rowIndex,
@@ -7894,13 +7906,14 @@ const canvasDetailButtonCell = computed(() => {
     rect,
     canQuickDownload,
     foreignKey,
+    externalUrl,
   };
 });
 
 const canvasDetailButtonStyle = computed(() => {
   const cell = canvasDetailButtonCell.value;
   if (!cell) return {};
-  const actionWidth = canvasDataGridActionOverlayWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value);
+  const actionWidth = canvasDataGridActionOverlayWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value, !!cell.externalUrl);
   const edgeGap = 6;
   return {
     left: `${Math.max(rowNumberWidth.value, cell.rect.left + cell.rect.width - actionWidth - edgeGap)}px`,
@@ -7914,7 +7927,7 @@ const canvasRightAlignedActionCell = computed(() => {
   return {
     rowIndex: cell.rowIndex,
     visibleColIdx: cell.visibleColIdx,
-    reservedWidth: canvasDataGridActionReservedWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value),
+    reservedWidth: canvasDataGridActionReservedWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value, !!cell.externalUrl),
   };
 });
 
@@ -8146,6 +8159,12 @@ async function cancelActiveExport() {
   await exportCancelHandler.value?.();
 }
 
+function changeExportQueryTimeout() {
+  if (!props.connectionId) return;
+  exportProgressDialog.value = false;
+  emit("changeQueryTimeout", props.connectionId);
+}
+
 const userFacingSql = ref("");
 let userFacingSqlGeneration = 0;
 
@@ -8181,6 +8200,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      injectDefaultTimeSeriesWhere: true,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
       limit: props.pageLimit ?? pageSize.value,
@@ -9849,6 +9869,25 @@ function canQuickDownloadCellValue(rowIndex: number, columnIndex: number): boole
   return canDownloadDetailBinaryValue(cellDetailFor(rowIndex, columnIndex));
 }
 
+function cellExternalUrlFor(rowIndex: number, columnIndex: number): string | null {
+  return cellExternalUrl(displayItemAt(rowIndex)?.data[columnIndex]);
+}
+
+function canOpenCellExternalUrl(rowIndex: number, columnIndex: number): boolean {
+  return cellExternalUrlFor(rowIndex, columnIndex) !== null;
+}
+
+async function openCellExternalUrl(rowIndex: number, columnIndex: number) {
+  const url = cellExternalUrlFor(rowIndex, columnIndex);
+  if (!url) return;
+  try {
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(url);
+  } catch {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 function downloadCellBinaryValue(rowIndex: number, columnIndex: number, mode: BinaryCellDownloadMode) {
   void downloadDetailBinaryValue(cellDetailFor(rowIndex, columnIndex), mode);
 }
@@ -10508,7 +10547,7 @@ watch(
 function onHeaderContext(col: string, columnIndex: number) {
   invalidateContextMenuTarget();
   const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
-  if (visibleColIdx >= 0 && !columnIsSelected(visibleColIdx)) {
+  if (visibleColIdx >= 0 && !columnIsExclusivelySelected(visibleColIdx)) {
     selectColumn(visibleColIdx);
   }
   contextHeaderColumn.value = col;
@@ -13029,6 +13068,16 @@ function openGridSnapshot() {
                             </template>
                           </LightDropdownMenu>
                           <button
+                            v-if="canOpenCellExternalUrl(cell.recordIndex, cell.valueIndex)"
+                            class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                            :title="t('grid.openUrl')"
+                            :aria-label="t('grid.openUrl')"
+                            @mousedown.stop
+                            @click.stop="openCellExternalUrl(cell.recordIndex, cell.valueIndex)"
+                          >
+                            <ExternalLink class="h-3 w-3" />
+                          </button>
+                          <button
                             v-if="cellDetailButtonEnabled"
                             class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                             :title="t('grid.cellDetails')"
@@ -13769,6 +13818,16 @@ function openGridSnapshot() {
                         </template>
                       </LightDropdownMenu>
                       <button
+                        v-if="canvasDetailButtonCell.externalUrl"
+                        class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                        :title="t('grid.openUrl')"
+                        :aria-label="t('grid.openUrl')"
+                        @mousedown.stop
+                        @click.stop="openCellExternalUrl(canvasDetailButtonCell.rowIndex, canvasDetailButtonCell.actualColIdx)"
+                      >
+                        <ExternalLink class="h-3 w-3" />
+                      </button>
+                      <button
                         v-if="canvasDetailButtonCell.foreignKey"
                         class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
                         :title="
@@ -14000,6 +14059,16 @@ function openGridSnapshot() {
                                 </button>
                               </template>
                             </LightDropdownMenu>
+                            <button
+                              v-if="canOpenCellExternalUrl(item.displayIndex, col.actualColIdx)"
+                              class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
+                              :title="t('grid.openUrl')"
+                              :aria-label="t('grid.openUrl')"
+                              @mousedown.stop
+                              @click.stop="openCellExternalUrl(item.displayIndex, col.actualColIdx)"
+                            >
+                              <ExternalLink class="h-3 w-3" />
+                            </button>
                             <button
                               v-if="cellDetailButtonEnabled"
                               class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground"
@@ -14799,7 +14868,17 @@ function openGridSnapshot() {
     />
     <ImagePreviewDialog v-if="imagePreviewMounted" v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />
-    <ExportProgressDialog v-if="exportProgressDialogMounted" v-model:open="exportProgressDialog" v-bind="exportProgressState" :disable-cancel="!exportCancelHandler" :can-minimize="exportCanMinimize" @cancel="cancelActiveExport" @minimize="exportProgressDialog = false" />
+    <ExportProgressDialog
+      v-if="exportProgressDialogMounted"
+      v-model:open="exportProgressDialog"
+      v-bind="exportProgressState"
+      :connection-id="connectionId"
+      :disable-cancel="!exportCancelHandler"
+      :can-minimize="exportCanMinimize"
+      @cancel="cancelActiveExport"
+      @minimize="exportProgressDialog = false"
+      @change-query-timeout="changeExportQueryTimeout"
+    />
   </div>
 </template>
 

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
@@ -7,6 +8,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
 import type { XuguTablespaceInfo } from "@/types/database";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
+import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
 async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -258,8 +260,16 @@ export interface McpConnectionPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   executionModeConfigured: boolean;
+  executionModePolicyVersion: number | null;
   databaseScope: "all" | "selected" | "none";
   allowedDatabases: string[];
+  databasePolicies: McpDatabasePolicy[];
+}
+
+export interface McpDatabasePolicy {
+  databaseName: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export interface SavedSqlSyncEntry {
@@ -731,6 +741,26 @@ export async function saveOpenTabsState(payload: OpenTabsStatePayload): Promise<
   return invoke("save_open_tabs_state", { payload });
 }
 
+export async function saveDetachedTabHandoff(tabId: string, handoff: DetachedTabHandoff): Promise<void> {
+  return invoke("save_detached_tab_handoff", { tabId, handoff });
+}
+
+export async function loadDetachedTabHandoff(tabId: string): Promise<DetachedTabHandoff | null> {
+  return invoke("load_detached_tab_handoff", { tabId });
+}
+
+export async function listDetachedTabHandoffs(): Promise<DetachedTabHandoff[]> {
+  return invoke("list_detached_tab_handoffs");
+}
+
+export async function deleteDetachedTabHandoff(tabId: string): Promise<void> {
+  return invoke("delete_detached_tab_handoff", { tabId });
+}
+
+export async function approveDetachedWindowClose(): Promise<void> {
+  return invoke("approve_detached_window_close");
+}
+
 export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
   return invoke("load_saved_sql_editor_positions");
 }
@@ -937,8 +967,8 @@ export async function writeExternalSqlFile(path: string, content: string, option
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension });
 }
 
 export interface SqlFileEntry {
@@ -4810,6 +4840,7 @@ export interface TableExportRequest {
   tableName: string;
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
+  csvQuoteMode?: CsvQuoteMode;
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
   columnComments?: Array<string | null> | null;
@@ -4833,6 +4864,7 @@ export interface TableCsvExportOptions {
   columns?: string[];
   pageSize?: number;
   timeoutSecs?: number;
+  csvQuoteMode?: CsvQuoteMode;
 }
 
 export interface TableExportProgress {
@@ -4857,6 +4889,7 @@ export interface QueryResultExportRequest {
   useAgentCursor: boolean;
   filePath: string;
   format: "csv" | "xlsx" | "txt" | "sql";
+  csvQuoteMode?: CsvQuoteMode;
   includeSqlSheet?: boolean;
   pageSize: number;
   rowLimit?: number | null;
@@ -5000,12 +5033,13 @@ export async function recordDatabaseExportDestination(directory: string): Promis
   await invoke("record_database_export_destination", { directory });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all"): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
       filePath,
       columns,
       rows,
+      csvQuoteMode,
     },
   });
 }
