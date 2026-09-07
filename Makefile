@@ -4,6 +4,7 @@ PNPM ?= pnpm
 TAURI_DEV_PORT ?= 1420
 DBX_STATIC_TARGET ?= $(if $(filter arm64 aarch64,$(shell uname -m)),aarch64-unknown-linux-musl,x86_64-unknown-linux-musl)
 DBX_STATIC_FEATURES ?= duckdb-sidecar,dynamodb,mq-admin,dbx-core/sqlite-bundled
+DBX_STATIC_OUTPUT_DIR ?= target/dist-web-static
 
 ifeq ($(DBX_STATIC_TARGET),aarch64-unknown-linux-musl)
 DBX_STATIC_RUSTFLAGS ?= -C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536
@@ -113,7 +114,7 @@ build-web-binary: node_modules/.modules.yaml
 	rustup target add $(DBX_STATIC_TARGET)
 	$(PNPM) build
 	RUSTFLAGS='$(DBX_STATIC_RUSTFLAGS)' cargo zigbuild --release -p dbx-web --target $(DBX_STATIC_TARGET) --no-default-features --features "$(DBX_STATIC_FEATURES)"
-	DBX_STATIC_TARGET=$(DBX_STATIC_TARGET) ./scripts/package-web-static.sh
+	DBX_STATIC_TARGET=$(DBX_STATIC_TARGET) DBX_STATIC_OUTPUT_DIR=$(DBX_STATIC_OUTPUT_DIR) ./scripts/package-web-static.sh
 
 build-web-binary-x64:
 	$(MAKE) build-web-binary DBX_STATIC_TARGET=x86_64-unknown-linux-musl DBX_STATIC_RUSTFLAGS='-C target-feature=+crt-static'
