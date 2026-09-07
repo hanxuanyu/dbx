@@ -5,6 +5,7 @@ import { ChevronsRight, FileText } from "@lucide/vue";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
 import AppTabBar from "@/components/layout/AppTabBar.vue";
+import { createGroupTabBarPortal, GROUP_TAB_BAR_PORTAL } from "@/components/layout/groupTabBarPortal";
 import AppSidebar from "@/components/layout/AppSidebar.vue";
 import SqlEditorWorkspace from "@/components/layout/SqlEditorWorkspace.vue";
 import { EDITOR_TOOLBAR_ACTIONS } from "@/components/layout/editorToolbarActions";
@@ -781,6 +782,16 @@ function requestActiveEditorExecuteInNewResultTab() {
 // Per-group editor toolbars call back into this App-owned orchestration. The
 // group focuses itself on pointerdown/focusin before any toolbar event, so the
 // acting tab is passed explicitly instead of relying on the focused group.
+// Declared above the provide: the object references the variable itself, while
+// the lazy getter safely reads later-declared update-count refs at render time.
+const specialPageTabs = computed(() => ({
+  settingsOpen: settingsPageTabOpen.value,
+  settingsActive: settingsStore.settingsPageActive,
+  driverStoreOpen: driverStoreTabOpen.value,
+  driverStoreActive: driverStoreActive.value,
+  driverUpdateCount: toolbarAgentDriverUpdateCount.value,
+}));
+provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || settingsStore.settingsPageActive))));
 provide(EDITOR_TOOLBAR_ACTIONS, {
   explainMode,
   blockDangerousRedisCommands,
@@ -804,6 +815,11 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   changeSchema: changeActiveSchema,
   setDefaultDatabase: setActiveDatabaseAsDefault,
   clearDefaultDatabase: clearActiveDefaultDatabase,
+  specialPageTabs,
+  activateSettingsPage,
+  closeSettingsPage,
+  activateDriverStore: () => openDriverStorePage(),
+  closeDriverStore: closeDriverStorePage,
 });
 
 // Upstream "preview changes" entry: dormant until the group toolbar wires the
@@ -896,12 +912,6 @@ useScheduledDatabaseBackups({ scheduler: true });
 
 const appVersion = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
-const isVerticalTabPlacement = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
-const tabWorkspaceLayoutClass = computed(() => {
-  if (settingsStore.editorSettings.tabPlacement === "bottom") return "flex-col-reverse";
-  if (settingsStore.editorSettings.tabPlacement === "right") return "flex-row-reverse";
-  return isVerticalTabPlacement.value ? "flex-row" : "flex-col";
-});
 
 // Every pane's vertical strip writes back to this shared width/collapse state.
 function startTabBarResize(event: MouseEvent) {
@@ -2241,6 +2251,7 @@ async function newQuery() {
     driverProfile: conn.driver_profile,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   if (initialSql) {
@@ -2453,7 +2464,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
           databaseType: resolvedDatabaseType,
           signature: navigation.signature,
         });
-        const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true });
+        const tabId = queryStore.createTab(target.connectionId, target.database, `Source - ${sourceName}`, "query", sourceSchema, editableSource, target.catalog, { forceNew: true, sourceView: true });
         const sourceIsEditable = raw.editable !== false && !["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY"].includes(resolvedType);
         if (sourceIsEditable) {
           queryStore.setObjectSource(tabId, {
@@ -2491,7 +2502,7 @@ function onQueryEditorObjectSourceSaved() {
   contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }
 
-async function changeActiveConnection(connectionId: string, tabId?: string) {
+async function changeActiveConnection(tabId: string, connectionId: string) {
   const tab = resolveToolbarTab(tabId);
   if (!tab) return;
   const connection = connectionStore.getConfig(connectionId);
@@ -2530,7 +2541,7 @@ async function changeActiveConnection(connectionId: string, tabId?: string) {
   }
 }
 
-function changeActiveDatabase(database: string, tabId?: string) {
+function changeActiveDatabase(tabId: string, database: string) {
   const tab = resolveToolbarTab(tabId);
   if (tab) {
     queryStore.updateDatabase(tab.id, database);
@@ -2541,7 +2552,7 @@ function changeActiveDatabase(database: string, tabId?: string) {
   }
 }
 
-function changeActiveCatalog(catalog: string | undefined, database: string, tabId?: string) {
+function changeActiveCatalog(tabId: string, catalog: string | undefined, database: string) {
   const tab = resolveToolbarTab(tabId);
   if (tab) {
     queryStore.updateCatalog(tab.id, catalog, database);
@@ -2561,7 +2572,7 @@ async function clearActiveDefaultDatabase(tabId?: string) {
   await connectionStore.clearDefaultDatabase(tab.connectionId);
 }
 
-function changeActiveSchema(schema: string | undefined, tabId?: string) {
+function changeActiveSchema(tabId: string, schema: string | undefined) {
   const tab = resolveToolbarTab(tabId);
   if (!tab) return;
   queryStore.updateSchema(tab.id, schema);
@@ -2833,7 +2844,7 @@ async function handleQuickOpenSelect(item: any) {
         databaseType,
         signature: item.signature,
       });
-      const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${objectName}`);
+      const tabId = queryStore.createTab(item.connectionId, item.database, `Source - ${objectName}`, "query", undefined, undefined, undefined, { sourceView: true });
       queryStore.updateSql(tabId, editableSource);
       if (item.type !== "sequence" && item.type !== "trigger" && item.type !== "event" && item.type !== "type" && item.type !== "type-body") {
         queryStore.setObjectSource(tabId, {
@@ -3432,7 +3443,7 @@ onUnmounted(() => {
           </div>
 
           <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
-            <div class="h-full flex min-w-0" :class="isDetachedWindowContext ? 'flex-col' : tabWorkspaceLayoutClass">
+            <div class="h-full flex min-h-0 min-w-0 flex-col">
               <AppTabBar
                 v-if="!isDetachedWindowContext"
                 ref="appTabBarRef"
@@ -3443,8 +3454,11 @@ onUnmounted(() => {
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
                 :detached-drop-target="detachedDropTargetTabId !== null"
                 :can-detach-tabs="isDesktop"
+                :tab-bar-width="tabBarWidth"
+                :tab-bar-collapsed="tabBarCollapsed"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
+                @activate-tab="activateQueryTab"
                 @close-driver-store="closeDriverStorePage"
                 @close-settings-page="closeSettingsPage"
                 @save-tab="handleSaveTab"
@@ -3453,7 +3467,26 @@ onUnmounted(() => {
                 @discard-all-tab-close="handleDiscardAllPendingTabClose"
                 @cancel-tab-close="cancelPendingAppClose"
                 @detach-tab="detachTab"
-              />
+              >
+                <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
+                <EditorSettingsPage
+                  v-if="settingsPageTabOpen"
+                  v-show="settingsStore.settingsPageActive"
+                  variant="page"
+                  :open="settingsPageTabOpen"
+                  :initial-tab="settingsInitialTab"
+                  :initial-section="settingsInitialSection"
+                  :navigation-request-id="settingsNavigationRequestId"
+                  :ai-config-draft="settingsAiConfigDraft"
+                  :ai-config-request-id="settingsAiConfigRequestId"
+                  :app-version="appVersion"
+                  :checking-updates="checkingUpdates"
+                  class="flex-1 min-h-0"
+                  @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
+                  @check-updates="checkUpdates()"
+                  @ai-config-deep-link-handled="settingsAiConfigDraft = null"
+                />
+              </AppTabBar>
               <DetachedTabHeader
                 v-else-if="activeTab"
                 :title="activeTab.title"
@@ -3477,32 +3510,16 @@ onUnmounted(() => {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
-              <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-                <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
-                <EditorSettingsPage
-                  v-if="settingsPageTabOpen"
-                  v-show="settingsStore.settingsPageActive"
-                  variant="page"
-                  :open="settingsPageTabOpen"
-                  :initial-tab="settingsInitialTab"
-                  :initial-section="settingsInitialSection"
-                  :navigation-request-id="settingsNavigationRequestId"
-                  :ai-config-draft="settingsAiConfigDraft"
-                  :ai-config-request-id="settingsAiConfigRequestId"
-                  :app-version="appVersion"
-                  :checking-updates="checkingUpdates"
-                  class="flex-1 min-h-0"
-                  @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
-                  @check-updates="checkUpdates()"
-                />
-                <div v-if="queryStore.tabs.length > 0" v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex flex-col flex-1 min-h-0">
+              <div v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex min-h-0 min-w-0 flex-1 flex-col">
+                <div class="flex flex-col flex-1 min-h-0">
                   <SqlEditorWorkspace
                     ref="contentAreaRef"
                     @locate-tab="locateTabInSidebar"
                     @toggle-zen-mode="toggleZenMode"
                     @start-resize="startTabBarResize"
                     @toggle-collapse="toggleTabBarCollapsed"
-                    :active-tab="activeTab!"
+                    :active-tab="activeTab ?? undefined"
+                    :show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"
                     :active-connection="activeConnection"
                     :tab-bar-width="tabBarWidth"
                     :tab-bar-collapsed="tabBarCollapsed"
@@ -3577,6 +3594,7 @@ onUnmounted(() => {
                     "
                     @object-schema-change="(tabId: string, schema: string | undefined) => queryStore.updateSchema(tabId, schema)"
                     @object-browser-viewport-change="(tabId: string, viewport: any) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
+                    @object-browser-search-change="(tabId: string, query: string) => queryStore.updateObjectBrowserSearch(tabId, query)"
                     @structure-editor-saved="
                       (tabId: string, commentChanged: boolean) => {
                         const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
@@ -3600,24 +3618,27 @@ onUnmounted(() => {
                     @structure-editor-close="(tabId: string) => queryStore.closeTab(tabId)"
                     @open-settings="openSettings"
                     @open-connection-settings="openConnectionSettings"
-                  />
+                  >
+                    <template #empty>
+                      <WelcomeScreen
+                        class="h-full min-h-0"
+                        :connection-stats="connectionStats"
+                        :recent-connections="recentConnections"
+                        :saved-sql-history-items="savedSqlHistoryItems"
+                        :app-version="appVersion"
+                        :has-connections="connectionStore.connections.length > 0"
+                        @open-connection-query="openConnectionQuery"
+                        @open-saved-sql="openSavedSqlFromWelcome"
+                        @new-connection="showConnectionDialog = true"
+                        @new-query="newQuery"
+                        @show-history="openRightSidebarPanel('history')"
+                        @import-config="dialogs.onImportClick"
+                        @open-github="openGitHub"
+                        @open-mcp-guide="openMcpGuide"
+                      />
+                    </template>
+                  </SqlEditorWorkspace>
                 </div>
-                <WelcomeScreen
-                  v-else-if="queryStore.tabs.length === 0 && !driverStoreActive && !settingsStore.settingsPageActive"
-                  :connection-stats="connectionStats"
-                  :recent-connections="recentConnections"
-                  :saved-sql-history-items="savedSqlHistoryItems"
-                  :app-version="appVersion"
-                  :has-connections="connectionStore.connections.length > 0"
-                  @open-connection-query="openConnectionQuery"
-                  @open-saved-sql="openSavedSqlFromWelcome"
-                  @new-connection="showConnectionDialog = true"
-                  @new-query="newQuery"
-                  @show-history="openRightSidebarPanel('history')"
-                  @import-config="dialogs.onImportClick"
-                  @open-github="openGitHub"
-                  @open-mcp-guide="openMcpGuide"
-                />
               </div>
             </div>
           </div>
