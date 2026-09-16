@@ -3835,6 +3835,7 @@ onUnmounted(() => {
                   @update:open="(open: boolean) => (open ? activateSettingsPage() : closeSettingsPage())"
                   @check-updates="checkUpdates()"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
+                  @new-plugin-connection="openPluginConnectionDialog"
                 />
               </AppTabBar>
               <DetachedTabHeader
