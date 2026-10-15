@@ -314,13 +314,15 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   function cloneNewRowMeta(meta: readonly GridNewRowMeta[]): GridNewRowMeta[] {
     return toRaw(meta).map((entry) => {
       const item = toRaw(entry);
-      return { token: item.token, placement: item.placement ? { ...toRaw(item.placement) } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...toRaw(item.editedColumns)] : undefined, untouched: item.untouched };
+      const cloned: GridNewRowMeta = { token: item.token, placement: item.placement ? { ...toRaw(item.placement) } : null, sourceIndex: item.sourceIndex, editedColumns: item.editedColumns ? [...toRaw(item.editedColumns)] : undefined };
+      if (item.untouched === true) cloned.untouched = true;
+      return cloned;
     });
   }
 
   function updateNewRowEditedColumns(newIndex: number, col: number, value: CellValue) {
     const meta = newRowMeta.value[newIndex];
-    if (meta) meta.untouched = false;
+    if (meta) delete meta.untouched;
     if (!meta || meta.sourceIndex === undefined) return;
     const baseline = result.value.rows[meta.sourceIndex]?.[col];
     const edited = new Set(meta.editedColumns);
@@ -1428,7 +1430,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
       mappedRows.push(nextRow);
       mappedMeta.push(rowIndex < reusableNewRowCount && sourceMeta[targetNewIndex! + rowIndex] ? cloneNewRowMeta([sourceMeta[targetNewIndex! + rowIndex]!])[0]! : allocateNewRowMeta(targetPlacement));
-      mappedMeta[mappedMeta.length - 1]!.untouched = false;
+      delete mappedMeta[mappedMeta.length - 1]!.untouched;
       if (pastedRows.length > batchSize && ((rowIndex + 1) % batchSize === 0 || rowIndex + 1 === pastedRows.length)) yield { completed: rowIndex + 1, total: pastedRows.length };
     }
 
@@ -2419,7 +2421,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     const scroll = includeScroll ? (readScrollPosition() ?? pendingScrollRestore) : undefined;
     if (includeScroll) pendingScrollRestore = scroll;
     const quickEntryDraftRowSnapshot = draftRowHasValue() ? [...quickEntryDraftRow.value] : undefined;
-    if (!hasPendingChanges.value && !quickEntryDraftRowSnapshot && !(includeEditing && editingCell.value) && !scroll) {
+    if (!hasPendingChanges.value && newRows.value.length === 0 && !quickEntryDraftRowSnapshot && !(includeEditing && editingCell.value) && !scroll) {
       pendingChangesCache.delete(k);
       return;
     }
