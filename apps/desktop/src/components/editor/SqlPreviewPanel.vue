@@ -15,6 +15,7 @@ const props = defineProps<{
   sql: string;
   sqlFormatDialect?: SqlFormatDialect;
   loading?: boolean;
+  emptyMessage?: string;
   canUndo?: boolean;
   canRedo?: boolean;
 }>();
@@ -209,7 +210,7 @@ onMounted(() => {
 
       <!-- Empty -->
       <div v-else-if="!hasSql" class="flex items-center justify-center h-full text-xs text-muted-foreground">
-        {{ t("grid.previewSqlEmpty") }}
+        {{ emptyMessage || t("grid.previewSqlEmpty") }}
       </div>
 
       <!-- Shiki highlighted SQL -->
