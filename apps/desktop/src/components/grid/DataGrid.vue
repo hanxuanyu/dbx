@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import QueryTimingDetails from "./QueryTimingDetails.vue";
-import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
+import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import { applyDdlSearchMarks } from "@/lib/sql/ddlSearchMarks";
 import { isAiPromptImeCompositionEvent } from "@/lib/ai/aiPromptKeyboard";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
@@ -105,6 +105,9 @@ import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHex
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
+import ObjectDependenciesPanel from "@/components/objects/ObjectDependenciesPanel.vue";
+import { objectDependencyTarget, type ObjectDependencyTarget, type ObjectDetailsSection } from "@/lib/database/objectDependencyDetails";
+import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
 import GridSnapshotDialog from "@/components/grid/GridSnapshotDialog.vue";
 import type { QueryResult, ColumnInfo, ConstraintInfo, DatabaseType, ForeignKeyInfo, IndexInfo, ObjectStatistics, PgTablePartitioning, TriggerInfo, TableInfoTab, QueryResultSourceColumnRef, QueryPageJumpProgress } from "@/types/database";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
@@ -613,6 +616,8 @@ interface DataGridProps {
   /** Document stores (e.g. MongoDB) count exactly on demand without SQL tableMeta/countSql. */
   countTotalRows?: () => Promise<number | undefined>;
   loading?: boolean;
+  /** Tab that owns this grid; a running save is tracked by tab (#13226). */
+  tabId?: string;
   cacheKey?: string;
   columnWidthCacheKey?: string;
   pendingStateKey?: string;
@@ -733,6 +738,7 @@ const emit = defineEmits<{
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
   cancel: [];
+  openDependencyObject: [context: ObjectDependencyTarget, target: SqlObjectNavigationTarget];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -861,6 +867,16 @@ const columnTypeMap = computed(() => {
 });
 const resolvedConnectionConfig = computed(() => connectionStore.getConfig(props.connectionId ?? ""));
 const resolvedDatabaseType = computed(() => props.databaseType ?? effectiveDatabaseTypeForConnection(resolvedConnectionConfig.value));
+const tableRelationsSection = ref<ObjectDetailsSection>("dependencies");
+const tableDependencyTarget = computed(() => {
+  const metadata = props.tableMeta;
+  const database = metadata?.database || props.database;
+  if (!metadata?.tableName || !props.connectionId || !database) return undefined;
+  return objectDependencyTarget({ connectionId: props.connectionId, database, catalog: metadata.catalog, schema: metadata.schema || props.schema || database, name: metadata.tableName, objectType: (metadata.tableType || "TABLE").toUpperCase().replaceAll(" ", "_") }, resolvedDatabaseType.value);
+});
+function viewRelationSql(context: ObjectDependencyTarget, sql: string) {
+  queryStore.createTab(context.connectionId, context.database, t("objectDependencies.viewSql"), "query", context.schema, sql, context.catalog, { forceNew: true });
+}
 const productionContext = computed(() => productionContextForDatabase(resolvedConnectionConfig.value, props.database));
 // The collection grid and Mongo query-result grids share the document-grid value
 // encoding (BSON null sentinel + JSON-prefixed containers), so every display,
@@ -893,7 +909,9 @@ const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const dataGridFilterExpandedRequiredWidth = ref(0);
 const columnCommentsInInfoArea = computed(() => settingsStore.editorSettings.dataGridColumnCommentsInInfoArea);
-const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader && !columnCommentsInInfoArea.value);
+// #13171: header comments and the selected column's info-area comment are
+// independent surfaces; enabling the info area no longer hides the header line.
+const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
 const showColumnHeaderTooltips = computed(() => settingsStore.editorSettings.showColumnHeaderTooltips !== false);
 const transposeMetadataInInfoColumn = computed(() => settingsStore.editorSettings.dataGridTransposeMetadataInInfoColumn);
@@ -4488,6 +4506,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
   const tableMeta = props.tableMeta;
   const connectionId = props.connectionId;
   if (!tableMeta || !connectionId) return false;
+  if (connectionStore.getConfig(connectionId)?.db_type === "jdbc" && resolvedDatabaseType.value === "oracle" && tableMeta.columns.some((column) => /^(?:CLOB|BLOB)$/i.test(column.data_type.trim()))) return false;
 
   const planResult = buildDataGridSavedRowRefreshPlan({
     context: props.context,
@@ -4645,6 +4664,7 @@ const editor = useDataGridEditor({
   ensureManualTransactionSession: computed(() => props.ensureManualTransactionSession),
   onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
   onSaveConflict: (message) => toast(message, 5000),
+  onAdoptedSaveCompleted: () => toast(t("grid.saveCompleted"), 3000),
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,
@@ -4662,6 +4682,10 @@ const editor = useDataGridEditor({
   pageSize,
   currentPage,
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
+  // A save outlives a tab switch that unmounts this grid, so it is tracked by
+  // tab and result payload rather than by component instance (#13226).
+  tabId: computed(() => props.tabId),
+  resultViewGeneration: computed(() => props.viewGeneration),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
   refreshSavedRows,
   prepareSaveBaseline: async (changes) => {
@@ -6664,6 +6688,16 @@ const selectionSummaryAverageText = computed(() => {
   if (isSelectingCells.value) return "…";
   return formatSelectionAverage(selectionSummary.value?.average);
 });
+const selectionSummaryMinText = computed(() => {
+  if (isSelectingCells.value) return "…";
+  const min = selectionSummary.value?.min;
+  return typeof min === "string" ? formatSelectionAggregate(min) : "—";
+});
+const selectionSummaryMaxText = computed(() => {
+  if (isSelectingCells.value) return "…";
+  const max = selectionSummary.value?.max;
+  return typeof max === "string" ? formatSelectionAggregate(max) : "—";
+});
 
 const isMultiRow = computed(() => multiRowCount.value > 1);
 
@@ -7722,7 +7756,7 @@ async function applyOrderBySearch(_value?: string, structuredOrderByOverride?: s
       columns: tableMeta.columns.map((column) => column.name),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
-      ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
+      ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value, !!props.connectionId && connectionStore.getConfig(props.connectionId)?.db_type === "jdbc"),
       orderBy: orderByClause,
       injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
@@ -7765,7 +7799,7 @@ async function applyWhereFilter() {
       columns: tableMeta.columns.map((column) => column.name),
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       primaryKeys: tableMeta.primaryKeys,
-      ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
+      ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value, !!props.connectionId && connectionStore.getConfig(props.connectionId)?.db_type === "jdbc"),
       orderBy: effectiveOrderBy(),
       limit: pageSize.value,
       injectDefaultTimeSeriesWhere: true,
@@ -12671,7 +12705,7 @@ const activeTableInfoTab = ref<TableInfoTab>(settingsStore.editorSettings.tableI
 const canPinTableInfo = computed(() => props.context === "table-data");
 const tableInfoDrawerPinned = computed(() => settingsStore.editorSettings.tableInfoDrawerPinned);
 const rawDdlContent = ref("");
-const ddlContent = computed(() => applyDdlStoragePreference(rawDdlContent.value, resolvedDatabaseType.value, settingsStore.editorSettings.excludeDdlStorage));
+const ddlContent = computed(() => applyDdlTextPreferences(rawDdlContent.value, resolvedDatabaseType.value, settingsStore.editorSettings));
 const tableInfoColumns = ref<ColumnInfo[]>(props.tableMeta?.columns ?? []);
 const tableInfoColumnsLoading = ref(false);
 const tableInfoColumnsRequestGeneration = ref(0);
@@ -13000,7 +13034,14 @@ const metadataLoaders = useDataGridTableMetadataLoaders({
   toastMongoIndexRefreshError: (message) => toast(t("contextMenu.mongoIndexRefreshFailed", { message }), 5000),
 });
 
-const { fetchDdl, fetchTableInfoColumns, fetchTableOwner, currentIndexTableIdentity, fetchIndexes, refreshMongoIndexMetadataAfterMutation, currentForeignKeyTableIdentity, fetchForeignKeys: fetchForeignKeysMetadata, fetchTriggers, fetchConstraints, fetchPartitions } = metadataLoaders;
+const { ddlError, fetchDdl, fetchTableInfoColumns, fetchTableOwner, currentIndexTableIdentity, fetchIndexes, refreshMongoIndexMetadataAfterMutation, currentForeignKeyTableIdentity, fetchForeignKeys: fetchForeignKeysMetadata, fetchTriggers, fetchConstraints, fetchPartitions } = metadataLoaders;
+
+watch(
+  () => settingsStore.editorSettings.separateDdlIndexes,
+  () => {
+    if ((resolvedDatabaseType.value === "oracle" || resolvedDatabaseType.value === "oceanbase-oracle") && showTableInfo.value && activeTableInfoTab.value === "ddl") void fetchDdl(false);
+  },
+);
 
 async function fetchTableOverview(force = false) {
   const connectionId = props.connectionId;
@@ -13087,6 +13128,7 @@ const tableInfoTabs = computed(() => {
       count: partitioning.value?.partitions.length,
     });
   }
+  if (tableDependencyTarget.value) tabs.push({ id: "relations", label: t("objectRelations.title"), icon: Network });
   return tabs;
 });
 const tableInfoTabListStyle = computed(() => ({
@@ -13113,7 +13155,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   // The drawer is often opened after the table was already selected, so the
   // partition status may never have been probed; do it here (once) before the
   // tab list is consulted, or the Partitions tab would be missing entirely.
-  if (!partitionStatusResolved.value) await probeTablePartitionStatus();
+  if (tab !== "relations" && !partitionStatusResolved.value) await probeTablePartitionStatus();
   const tabSupported = tableInfoTabs.value.some((item) => item.id === tab);
   const nextTab = tabSupported ? tab : tableInfoTabs.value[0]?.id;
   if (!nextTab) return;
@@ -13515,12 +13557,13 @@ if (showTableInfo.value && props.tableMeta && props.connectionId) {
 }
 
 function copyDdl() {
+  if (ddlLoading.value || ddlError.value || !ddlContent.value) return;
   copyText(ddlContent.value);
 }
 
 function openTableStructureEditor(initialTab: TableInfoTab = "columns"): boolean {
   if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !canOpenTableStructureEditor.value) return false;
-  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, initialTab, undefined, props.tableMeta.catalog, (props.tableMeta.tableType || "").toUpperCase() === "VIEW" ? "view" : "table");
+  queryStore.openTableStructure(props.connectionId, props.database, props.tableMeta.schema, props.tableMeta.tableName, initialTab === "relations" ? "columns" : initialTab, undefined, props.tableMeta.catalog, (props.tableMeta.tableType || "").toUpperCase() === "VIEW" ? "view" : "table");
   return true;
 }
 
@@ -16331,7 +16374,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               <TableProperties class="w-3.5 h-3.5 text-muted-foreground" />
               <span class="text-xs font-medium flex-1 min-w-0 truncate">{{ tableMeta?.tableName }}</span>
               <div v-if="activeTableInfoTab === 'ddl'" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
-                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
+                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :disabled="ddlLoading || !!ddlError || !ddlContent" :title="t('grid.copyDdl')" :aria-label="t('grid.copyDdl')" @click="copyDdl">
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
@@ -16389,7 +16432,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               </button>
             </div>
 
-            <div class="px-2 py-1.5 border-b shrink-0 bg-background">
+            <div v-if="activeTableInfoTab !== 'relations'" class="px-2 py-1.5 border-b shrink-0 bg-background">
               <div class="flex min-w-0 items-center gap-1">
                 <div class="relative min-w-0 flex-1">
                   <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
@@ -16415,8 +16458,9 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
               </div>
             </div>
 
+            <ObjectDependenciesPanel v-if="activeTableInfoTab === 'relations'" :target="tableDependencyTarget" v-model:section="tableRelationsSection" :include-source="false" @view-sql="viewRelationSql" @open-object="(context, target) => emit('openDependencyObject', context, target)" />
             <DataGridTableInfoPanels
-              v-if="activeTableInfoTab !== 'ddl'"
+              v-else-if="activeTableInfoTab !== 'ddl'"
               :active-tab="activeTableInfoTab"
               :search-query="searchQuery"
               :table-name="props.tableMeta?.tableName ?? ''"
@@ -16693,6 +16737,10 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         :selection-summary="selectionSummary"
         :selection-summary-sum-text="selectionSummarySumText"
         :selection-summary-average-text="selectionSummaryAverageText"
+        :selection-summary-min-text="selectionSummaryMinText"
+        :selection-summary-max-text="selectionSummaryMaxText"
+        :selection-summary-count="selectionSummary?.numericCount ?? 0"
+        :selection-summary-distinct-count="selectionSummary?.distinctCount ?? 0"
         :selection-summary-pending="isSelectingCells"
         :loading="gridPaginationBusy || infiniteScrollLoading"
         :infinite-scroll-enabled="infiniteScrollEnabled"

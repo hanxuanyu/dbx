@@ -1,3 +1,4 @@
+import { tableColumnPasteId as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuId as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/id";
@@ -7,6 +8,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 import { meilisearchManagementId } from "./meilisearchManagement";
 
 export default withEnglishFallback({
+  tableColumnPaste,
   objectDependencies: {
     dependencies: "Dependensi",
     dependents: "Objek yang bergantung",
@@ -707,6 +709,7 @@ export default withEnglishFallback({
     regexSearchTooltip: "Cocokkan nama, komentar, dan alias di bilah sisi dengan ekspresi reguler JavaScript.",
     clearFilter: "Bersihkan filter",
     locateTargetNotFound: "Item tidak tersedia di bilah sisi. Item mungkin telah dihapus atau disembunyikan.",
+    locateSqlFile: "Temukan dalam daftar file SQL",
     locateActiveTab: "Cari di bilah sisi",
   },
   savedSql: {
@@ -745,6 +748,8 @@ export default withEnglishFallback({
     createFolderFailed: "Gagal membuat folder: {message}",
   },
   sqlLibrary: {
+    searchContentIncomplete: "Hasil pencarian tidak lengkap: konten {count} berkas tidak dapat dimuat.",
+    matchPreviewLimit: "Pratinjau dibatasi pada {limit} baris pertama dari {total} baris yang cocok.",
     title: "SQL Library",
     storageHelp: "Konten SQL Library disimpan di data aplikasi DBX, bukan sebagai file .sql tersendiri di disk.\nUntuk menggunakan file di sistem berkas, ekspor SQL Library.",
     unassociated: "Tidak terkait",
@@ -1065,6 +1070,9 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "Sertifikat klien dan private key harus diberikan bersamaan saat MySQL memerlukan mTLS.",
     mysqlTlsConnectionFailureHint: "Jika server MySQL tidak memerlukan TLS, edit koneksi, tetapkan Mode TLS ke Dinonaktifkan, lalu coba lagi.",
+    mysqlUnsupportedTlsVersionHint:
+      "Driver MySQL bawaan DBX mendukung TLS 1.2/1.3; server ini mungkin hanya mendukung versi lama. Tingkatkan atau konfigurasi ulang TLS server, atau gunakan klien kompatibel atau proksi konversi TLS. TLS hanya dapat dinonaktifkan jika akun tidak memiliki REQUIRE SSL; jika tidak, MySQL dapat mengembalikan 1045. SSH saja tidak memenuhi REQUIRE SSL.",
+    mysqlDisabledTlsAccessDeniedHint: "Saat TLS dinonaktifkan, 1045 dapat berarti akun memerlukan SSL, bukan hanya kata sandi atau izin yang salah. Periksa SHOW GRANTS akun dari sesi administrator yang berfungsi. SSH saja tidak memenuhi REQUIRE SSL.",
     mysqlUnsupportedCertVersionHint: "Verifikasi ketat tidak mendukung versi sertifikat server ini. Gantilah dengan sertifikat X.509 v3, atau gunakan mode Wajib hanya pada jaringan tepercaya.",
     mysqlClientCertBrowse: "Pilih sertifikat klien",
     mysqlClientKeyBrowse: "Pilih private key klien",
@@ -1877,6 +1885,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Tambah kemunculan berikutnya",
       selectAllSelectionOccurrences: "Pilih semua kemunculan",
       selectCurrentStatement: "Pilih pernyataan saat ini",
+      copyCurrentStatement: "Salin pernyataan saat ini",
       expandSelectStar: "Perluas * menjadi kolom",
       expandSelectStarUnavailable: "Tidak dapat memuat kolom untuk tabel ini",
       findReplace: "Cari/Ganti",
@@ -1916,6 +1925,7 @@ export default withEnglishFallback({
       searchFailed: "Pencarian gagal atau kehabisan waktu. Sederhanakan ekspresi dan coba lagi.",
       caseSensitive: "Case sensitive",
       regex: "Ekspresi reguler",
+      wholeWord: "Kata utuh",
       collapseReplace: "Ciutkan ganti",
       expandReplace: "Perluas ganti",
       prevMatch: "Sebelumnya (Shift+Enter)",
@@ -2273,6 +2283,10 @@ export default withEnglishFallback({
     copyAll: "Salin Semua (TSV)",
     selectionSum: "SUM: {value}",
     selectionAverage: "AVG: {value}",
+    selectionMin: "Min {value}",
+    selectionMax: "Maks {value}",
+    selectionCount: "Jumlah {count}",
+    selectionDistinct: "Berbeda {count}",
     selectionCells: "{count} sel",
     clearSelection: "Bersihkan Pilihan",
     export: "Ekspor",
@@ -4147,8 +4161,9 @@ export default withEnglishFallback({
     ddlOpenModeTab: "Buka di tab baru",
     resizeDdlDialog: "Ubah ukuran dialog DDL",
     ddlCopied: "DDL disalin",
-    excludeDdlStorage: "Kecualikan atribut penyimpanan",
-    excludeDdlStorageHint: "Berlaku untuk tampilan DDL Oracle dan OceanBase Oracle, penyalinan, dan ekspor struktur. Nonaktifkan untuk mempertahankan opsi kompresi, replika, dan penyimpanan. Partisi dan constraint tetap dipertahankan.",
+    compactDdlSql: "SQL ringkas",
+    includeDdlStorage: "Atribut penyimpanan",
+    separateDdlIndexes: "Indeks terpisah",
     refreshDdlOnOpen: "Segarkan setiap kali dibuka",
     refreshDdlOnOpenHint: "Jika diaktifkan, DDL dimuat ulang dari database setiap kali dibuka; jika dinonaktifkan, data cache lebih diutamakan",
     ddlRefreshFailed: "Gagal menyegarkan DDL: {message}",
@@ -7596,6 +7611,25 @@ export default withEnglishFallback({
     completedWithErrors: "Eksekusi selesai: {succeeded} berhasil, {failed} gagal",
   },
   sqlFileTree: {
+    searchIncompleteHelp: "Alasan hasil pencarian ini tidak lengkap:",
+    searchSkippedTooLarge: "Lebih besar dari 32 MiB: {count} file dilewati.",
+    searchSkippedUnreadable: "Tidak dapat dibaca (mungkin dihapus atau akses ditolak): {count} file atau folder.",
+    searchSkippedInvalidEncoding: "Pengodean file tidak dikenali: {count} file.",
+    searchSkippedOutsideRoot: "Jalur sebenarnya di luar folder akar yang dipilih: {count} file.",
+    searchSkippedNotRegularFile: "Bukan file biasa (misalnya diganti tautan simbolis): {count} item.",
+    searchSkippedOther: "Dilewati karena alasan lain: {count} item.",
+    searchPreviewLimits: "Pratinjau dipotong: maksimal {perFile} baris per file dan {total} baris per pencarian. Pencarian file yang cocok dan penghitungan baris tetap dilanjutkan.",
+    searchMode: "Lingkup pencarian",
+    searchByName: "Berkas",
+    searchByContent: "Isi",
+    searchContentPlaceholder: "Cari isi file...",
+    searchPlaceholder: "Cari nama file...",
+    searching: "Mencari isi file...",
+    searchIncomplete: "Pencarian tidak lengkap: {skipped} file atau folder dilewati; cuplikan yang cocok mungkin terpotong.",
+    searchFailed: "Pencarian isi gagal: {message}",
+    sortManual: "Urutan manual",
+    sortManualHint: "Seret file dalam folder yang sama untuk mengubah urutan. Penyeretan dinonaktifkan saat mencari.",
+    sortSaveFailed: "Tidak dapat menyimpan preferensi urutan file.",
     folderNameInvalid: "Masukkan satu nama folder, bukan jalur.",
     folderNameExcluded: "Nama folder ini dikecualikan dari penjelajah file SQL.",
     folderDepthExceeded: "Kedalaman folder maksimum telah tercapai.",
@@ -9014,6 +9048,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_namedDescription: "Minta nilai untuk mensubstitusi placeholder bernama.",
     sqlVariableSyntax_shell: "Placeholder bergaya shell",
     sqlVariableSyntax_shellDescription: "Minta nilai untuk mensubstitusi placeholder bergaya shell.",
+    sqlVariableSyntax_bracketedShell: "Placeholder bergaya shell dalam kurung siku",
+    sqlVariableSyntax_bracketedShellDescription: "Minta nilai untuk mensubstitusi placeholder bergaya shell dalam kurung siku; kurung siku dihapus saat substitusi.",
     sqlVariableSyntax_mybatis: "Placeholder bergaya MyBatis",
     sqlVariableSyntax_mybatisDescription: "Minta nilai untuk mensubstitusi placeholder bergaya MyBatis.",
     sqlVariableSyntax_sqlserver: "Placeholder bergaya SQL Server",
@@ -10438,6 +10474,9 @@ export default withEnglishFallback({
     kafkaLatest: "N pesan terbaru (default)",
     kafkaEarliest: "Pesan paling awal",
     kafkaOffset: "Dari offset",
+    kafkaTimestamp: "Dari waktu",
+    startTimestamp: "Waktu mulai",
+    timestampRequired: "Pilih waktu mulai atau posisi mulai lain.",
     timeOrder: "Urutan waktu",
     newestFirst: "Terbaru lebih dulu",
     oldestFirst: "Terlama lebih dulu",

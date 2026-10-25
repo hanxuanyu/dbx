@@ -1,3 +1,4 @@
+import { tableColumnPastePl as tableColumnPaste } from "./tableColumnPaste";
 import { withEnglishFallback } from "./fallback";
 import { redisGroupingPl as redisGrouping } from "./redisGrouping";
 import docs from "./docs/pl";
@@ -62,6 +63,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  tableColumnPaste,
   objectDependencies: {
     dependencies: "Zależności",
     dependents: "Obiekty zależne",
@@ -771,6 +773,7 @@ export default withEnglishFallback({
     regexSearchTooltip: "Dopasowuj nazwy, komentarze i aliasy w panelu bocznym przy użyciu wyrażeń regularnych JavaScript.",
     clearFilter: "Wyczyść filtr",
     locateTargetNotFound: "Pozycja nie jest dostępna w panelu bocznym. Mogła zostać usunięta lub ukryta.",
+    locateSqlFile: "Znajdź na liście plików SQL",
     locateActiveTab: "Znajdź na pasku bocznym",
   },
   savedSql: {
@@ -869,6 +872,8 @@ export default withEnglishFallback({
     collapseAll: "Zwiń wszystko",
     moreMatches: "+ {count} dodatkowych wyników",
     collapseMatches: "Zwiń",
+    searchContentIncomplete: "Niepełne wyniki wyszukiwania: nie udało się wczytać treści {count} plików.",
+    matchPreviewLimit: "Podgląd jest ograniczony do pierwszych {limit} z {total} pasujących wierszy.",
   },
 
   connection: {
@@ -1129,6 +1134,9 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "Jeśli MySQL wymaga mTLS, certyfikat klienta i klucz prywatny trzeba podać razem.",
     mysqlTlsConnectionFailureHint: "Jeżeli serwer MySQL nie wymaga TLS, edytuj połączenie, ustaw Tryb TLS na Wyłączony i spróbuj ponownie.",
+    mysqlUnsupportedTlsVersionHint:
+      "Wbudowany sterownik MySQL w DBX obsługuje TLS 1.2/1.3; ten serwer może obsługiwać tylko starsze wersje. Zaktualizuj lub skonfiguruj TLS serwera albo użyj zgodnego klienta lub proxy konwertującego TLS. TLS można wyłączyć tylko dla kont bez REQUIRE SSL; w przeciwnym razie MySQL może zwrócić 1045. Sam SSH nie spełnia REQUIRE SSL.",
+    mysqlDisabledTlsAccessDeniedHint: "Przy wyłączonym TLS błąd 1045 może oznaczać, że konto wymaga SSL, a nie tylko błędne hasło lub uprawnienia. Sprawdź SHOW GRANTS konta w działającej sesji administratora. Sam SSH nie spełnia REQUIRE SSL.",
     mysqlUnsupportedCertVersionHint: "Weryfikacja ścisła nie obsługuje tej wersji certyfikatu serwera. Zastąp go certyfikatem X.509 v3 albo użyj trybu Wymagany tylko w zaufanej sieci.",
     mysqlClientCertBrowse: "Wybierz certyfikat klienta",
     mysqlClientKeyBrowse: "Wybierz klucz prywatny klienta",
@@ -1921,6 +1929,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Dodaj następne wystąpienie",
       selectAllSelectionOccurrences: "Zaznacz wszystkie wystąpienia",
       selectCurrentStatement: "Zaznacz bieżącą instrukcję",
+      copyCurrentStatement: "Kopiuj bieżącą instrukcję",
       expandSelectStar: "Rozwiń * do listy kolumn",
       expandSelectStarUnavailable: "Nie można wczytać kolumn tej tabeli",
       findReplace: "Znajdź i zamień",
@@ -1959,6 +1968,7 @@ export default withEnglishFallback({
       replaceAll: "Zamień wszystkie",
       caseSensitive: "Uwzględniaj wielkość liter",
       regex: "Wyrażenie regularne",
+      wholeWord: "Całe słowo",
       collapseReplace: "Zwiń pole zamiany",
       expandReplace: "Rozwiń pole zamiany",
       prevMatch: "Poprzednie (Shift+Enter)",
@@ -2357,6 +2367,10 @@ export default withEnglishFallback({
     copyAll: "Kopiuj wszystko (TSV)",
     selectionSum: "SUMA: {value}",
     selectionAverage: "ŚREDNIA: {value}",
+    selectionMin: "Min {value}",
+    selectionMax: "Maks {value}",
+    selectionCount: "COUNT {count}",
+    selectionDistinct: "DISTINCT {count}",
     selectionCells: "Komórki: {count}",
     clearSelection: "Wyczyść zaznaczenie",
     export: "Eksportuj",
@@ -4217,8 +4231,9 @@ export default withEnglishFallback({
     ddlOpenModeTab: "Otwórz w nowej karcie",
     resizeDdlDialog: "Zmień rozmiar okna DDL",
     ddlCopied: "Skopiowano DDL",
-    excludeDdlStorage: "Pomiń atrybuty przechowywania",
-    excludeDdlStorageHint: "Dotyczy wyświetlania, kopiowania i eksportu DDL dla Oracle i OceanBase Oracle. Wyłącz, aby zachować opcje kompresji, replik i składowania. Partycje i ograniczenia są zachowywane.",
+    compactDdlSql: "Zwięzły SQL",
+    includeDdlStorage: "Atrybuty przechowywania",
+    separateDdlIndexes: "Oddzielne indeksy",
     refreshDdlOnOpen: "Odśwież przy każdym otwarciu",
     refreshDdlOnOpenHint: "Po włączeniu definicja DDL jest każdorazowo pobierana z bazy przy otwieraniu; po wyłączeniu preferowane są dane z pamięci podręcznej",
     ddlRefreshFailed: "Nie udało się odświeżyć DDL: {message}",
@@ -7650,6 +7665,25 @@ export default withEnglishFallback({
     totalFiles: "Pliki: {count}",
   },
   sqlFileTree: {
+    searchIncompleteHelp: "Dlaczego wyniki wyszukiwania są niepełne:",
+    searchSkippedTooLarge: "Rozmiar ponad 32 MiB: pominięto {count} plików.",
+    searchSkippedUnreadable: "Nie można odczytać (być może usunięte lub brak dostępu): {count} plików lub folderów.",
+    searchSkippedInvalidEncoding: "Nierozpoznane kodowanie: {count} plików.",
+    searchSkippedOutsideRoot: "Rzeczywista ścieżka poza wybranym folderem głównym: {count} plików.",
+    searchSkippedNotRegularFile: "Nie są zwykłymi plikami (np. zastąpione dowiązaniami symbolicznymi): {count} elementów.",
+    searchSkippedOther: "Pominięto z innych powodów: {count} elementów.",
+    searchPreviewLimits: "Podgląd został skrócony: do {perFile} wierszy na plik i {total} na wyszukiwanie. Wyszukiwanie pasujących plików i zliczanie wierszy trwa nadal.",
+    searchMode: "Zakres wyszukiwania",
+    searchByName: "Plik",
+    searchByContent: "Treść",
+    searchContentPlaceholder: "Szukaj w treści plików...",
+    searchPlaceholder: "Szukaj nazw plików...",
+    searching: "Wyszukiwanie w treści plików...",
+    searchIncomplete: "Wyszukiwanie niepełne: pominięto {skipped} plików lub folderów; pasujące fragmenty mogą być ucięte.",
+    searchFailed: "Wyszukiwanie w treści nie powiodło się: {message}",
+    sortManual: "Kolejność ręczna",
+    sortManualHint: "Przeciągaj pliki w tym samym folderze, aby zmienić kolejność. Przeciąganie jest wyłączone podczas wyszukiwania.",
+    sortSaveFailed: "Nie udało się zapisać ustawienia sortowania plików.",
     title: "Aktualizacja zabezpieczeń danych",
     storageHelp: "Są to rzeczywiste pliki .sql na dysku otwarte przez „Otwórz folder”. Zmiany zapisywane są bezpośrednio w pliku źródłowym.",
     openFolder: "Otwórz folder",
@@ -9052,6 +9086,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_namedDescription: "Pytaj o wartość do podstawienia dla nazwanych symboli zastępczych.",
     sqlVariableSyntax_shell: "Symbol zastępczy w stylu powłoki (shell)",
     sqlVariableSyntax_shellDescription: "Pytaj o wartość do podstawienia dla symboli zastępczych w stylu powłoki.",
+    sqlVariableSyntax_bracketedShell: "Symbol zastępczy w stylu powłoki w nawiasach kwadratowych",
+    sqlVariableSyntax_bracketedShellDescription: "Pytaj o wartość do podstawienia dla symboli zastępczych w stylu powłoki w nawiasach kwadratowych; nawiasy są usuwane podczas podstawiania.",
     sqlVariableSyntax_mybatis: "Symbol zastępczy w stylu MyBatis",
     sqlVariableSyntax_mybatisDescription: "Pytaj o wartość do podstawienia dla symboli zastępczych w stylu MyBatis.",
     sqlVariableSyntax_sqlserver: "Symbol zastępczy w stylu SQL Server",

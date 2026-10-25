@@ -1,3 +1,4 @@
+import { tableColumnPasteAz as tableColumnPaste } from "./tableColumnPaste";
 import { sidebarMenuAz as sidebarMenu } from "./sidebarMenuMessages";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/az";
@@ -61,6 +62,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  tableColumnPaste,
   objectDependencies: {
     dependencies: "Asılılıqlar",
     dependents: "Asılı obyektlər",
@@ -502,6 +504,7 @@ export default withEnglishFallback({
     regexSearchTooltip: "Yan paneldəki adları, şərhləri və ləqəbləri JavaScript müntəzəm ifadələri ilə uyğunlaşdırın.",
     clearFilter: "Süzgəci təmizlə",
     locateTargetNotFound: "Element yan paneldə mövcud deyil. O, silinmiş və ya gizlədilmiş ola bilər.",
+    locateSqlFile: "SQL fayl siyahısında tap",
     locateActiveTab: "Yan paneldə tap",
   },
   savedSql: {
@@ -601,6 +604,8 @@ export default withEnglishFallback({
     collapseAll: "Hamısını yığ",
     moreMatches: "+ {count} uyğunluq daha",
     collapseMatches: "Yığ",
+    searchContentIncomplete: "Axtarış nəticələri natamamdır: {count} faylın məzmunu yüklənə bilmədi.",
+    matchPreviewLimit: "Cəmi {total} uyğun sətirdən yalnız ilk {limit} sətir üçün önizləmə mövcuddur.",
   },
 
   connection: {
@@ -807,6 +812,9 @@ export default withEnglishFallback({
     mysqlClientKeyPlaceholder: "/path/to/client.key",
     mysqlClientCertHint: "MySQL mTLS tələb etdikdə müştəri sertifikatı və məxfi açar birlikdə təqdim edilməlidir.",
     mysqlTlsConnectionFailureHint: "MySQL serveri TLS tələb etmirsə, əlaqəni redaktə edin, TLS rejimini deaktiv edin və yenidən cəhd edin.",
+    mysqlUnsupportedTlsVersionHint:
+      "DBX-in daxili MySQL drayveri TLS 1.2/1.3 dəstəkləyir; bu server yalnız köhnə versiyaları dəstəkləyə bilər. Server TLS-ni yeniləyin və ya yenidən qurun, yaxud uyğun müştəri və ya TLS çevirici proksi istifadə edin. TLS yalnız hesabda REQUIRE SSL olmadıqda söndürülə bilər; əks halda MySQL 1045 qaytara bilər. Təkcə SSH, REQUIRE SSL tələbini ödəmir.",
+    mysqlDisabledTlsAccessDeniedHint: "TLS söndürüldükdə 1045 yalnız yanlış parol və ya icazələr deyil, hesabın SSL tələb etdiyini də göstərə bilər. İşləyən administrator sessiyasından hesabın SHOW GRANTS nəticəsini yoxlayın. Təkcə SSH, REQUIRE SSL tələbini ödəmir.",
     mysqlUnsupportedCertVersionHint: "Ciddi yoxlama bu server sertifikatı versiyasını dəstəkləmir. Onu X.509 v3 sertifikatı ilə əvəz edin və ya yalnız etibarlı şəbəkədə məcburi rejimdən istifadə edin.",
     mysqlClientCertBrowse: "Müştəri sertifikatını seçin",
     mysqlClientKeyBrowse: "Müştərinin məxfi açarını seçin",
@@ -1609,6 +1617,7 @@ export default withEnglishFallback({
       addNextSelectionOccurrence: "Növbəti uyğunluğu əlavə et",
       selectAllSelectionOccurrences: "Bütün uyğunluqları seç",
       selectCurrentStatement: "Cari ifadəni seç",
+      copyCurrentStatement: "Cari ifadəni kopyala",
       expandSelectStar: "* işarəsini sütunlarla əvəz et",
       expandSelectStarUnavailable: "Bu cədvəlin sütunlarını yükləmək mümkün deyil",
       findReplace: "Tap/əvəz et",
@@ -1648,6 +1657,7 @@ export default withEnglishFallback({
       searchFailed: "Axtarış uğursuz oldu və ya vaxtı bitdi. İfadəni sadələşdirib yenidən cəhd edin.",
       caseSensitive: "Böyük və kiçik hərflərə həssas",
       regex: "Müntəzəm ifadə",
+      wholeWord: "Bütöv söz",
       collapseReplace: "Əvəzetməni yığ",
       expandReplace: "Əvəzetməni genişləndir",
       prevMatch: "Əvvəlki (Shift+Enter)",
@@ -1973,6 +1983,10 @@ export default withEnglishFallback({
     copyAll: "Hamısını kopyala (TSV)",
     selectionSum: "SUM: {value}",
     selectionAverage: "AVG: {value}",
+    selectionMin: "Min {value}",
+    selectionMax: "Maks {value}",
+    selectionCount: "Say {count}",
+    selectionDistinct: "Unikal {count}",
     selectionCells: "{count} xana",
     clearSelection: "Seçimi təmizlə",
     export: "İxrac et",
@@ -3812,8 +3826,9 @@ export default withEnglishFallback({
     ddlOpenModeTab: "Yeni vərəqdə aç",
     resizeDdlDialog: "DDL dialoqunun ölçüsünü dəyiş",
     ddlCopied: "DDL kopyalandı",
-    excludeDdlStorage: "Saxlama atributlarını çıxar",
-    excludeDdlStorageHint: "Oracle və OceanBase Oracle DDL-in göstərilməsinə, kopyalanmasına və strukturun ixracına tətbiq olunur. Sıxılma, replika və saxlama parametrlərini saxlamaq üçün söndürün. Bölmələr və məhdudiyyətlər həmişə saxlanılır.",
+    compactDdlSql: "Yığcam SQL",
+    includeDdlStorage: "Saxlama atributları",
+    separateDdlIndexes: "Ayrı indekslər",
     refreshDdlOnOpen: "Hər açılışda yenilə",
     refreshDdlOnOpenHint: "Aktiv olduqda DDL hər açılışda verilənlər bazasından yenidən yüklənir; deaktiv olduqda keşdəki məlumatlara üstünlük verilir",
     ddlRefreshFailed: "DDL yenilənməsi alınmadı: {message}",
@@ -6895,6 +6910,25 @@ export default withEnglishFallback({
     completedWithErrors: "İcra tamamlandı: {succeeded} uğurlu, {failed} uğursuz",
   },
   sqlFileTree: {
+    searchIncompleteHelp: "Bu axtarışın natamam olmasının səbəbləri:",
+    searchSkippedTooLarge: "32 MiB-dan böyükdür: {count} fayl ötürüldü.",
+    searchSkippedUnreadable: "Oxumaq mümkün olmadı (silinmiş ola bilər və ya giriş icazəsi yoxdur): {count} fayl və ya qovluq.",
+    searchSkippedInvalidEncoding: "Fayl kodlaşdırması tanınmadı: {count} fayl.",
+    searchSkippedOutsideRoot: "Həqiqi yol seçilmiş kök qovluqdan kənardadır: {count} fayl.",
+    searchSkippedNotRegularFile: "Adi fayl deyil (məsələn, simvolik keçidlə əvəz edilib): {count} element.",
+    searchSkippedOther: "Digər səbəblərlə ötürüldü: {count} element.",
+    searchPreviewLimits: "Önizləmələr qısaldılıb: hər fayl üçün ən çox {perFile}, hər axtarış üçün {total} sətir. Uyğun faylların axtarışı və uyğun sətirlərin sayılması davam edir.",
+    searchMode: "Axtarış sahəsi",
+    searchByName: "Fayl",
+    searchByContent: "Məzmun",
+    searchContentPlaceholder: "Fayl məzmununda axtar...",
+    searchPlaceholder: "Fayl adlarında axtar...",
+    searching: "Fayl məzmununda axtarılır...",
+    searchIncomplete: "Axtarış natamamdır: {skipped} fayl və ya qovluq ötürüldü; uyğun fraqmentlər qısaldıla bilər.",
+    searchFailed: "Məzmun axtarışı uğursuz oldu: {message}",
+    sortManual: "Əl ilə sıralama",
+    sortManualHint: "Sıralamaq üçün eyni qovluqdakı faylları sürükləyin. Axtarış zamanı sürükləmə deaktivdir.",
+    sortSaveFailed: "Fayl sıralama seçimini saxlamaq mümkün olmadı.",
     folderNameInvalid: "Yol deyil, tək qovluq adı daxil edin.",
     folderNameExcluded: "Bu qovluq adı SQL fayl brauzerindən istisna edilib.",
     folderDepthExceeded: "Maksimum qovluq dərinliyinə çatılıb.",
@@ -8204,6 +8238,8 @@ export default withEnglishFallback({
     sqlVariableSyntax_namedDescription: "Adlandırılmış yer tutucuları əvəz etmək üçün dəyər soruş.",
     sqlVariableSyntax_shell: "Əmr örtüyü üslublu yer tutucu",
     sqlVariableSyntax_shellDescription: "Əmr örtüyü üslublu yer tutucuları əvəz etmək üçün dəyər soruş.",
+    sqlVariableSyntax_bracketedShell: "Mötərizəli əmr örtüyü üslublu yer tutucu",
+    sqlVariableSyntax_bracketedShellDescription: "Mötərizəli əmr örtüyü üslublu yer tutucuları əvəz etmək üçün dəyər soruş; mötərizələr əvəzetmə zamanı çıxarılır.",
     sqlVariableSyntax_mybatis: "MyBatis üslublu yer tutucu",
     sqlVariableSyntax_mybatisDescription: "MyBatis üslublu yer tutucuları əvəz etmək üçün dəyər soruş.",
     sqlVariableSyntax_sqlserver: "SQL Server üslublu yer tutucu",
@@ -9597,6 +9633,9 @@ export default withEnglishFallback({
     kafkaLatest: "Son N mesaj (standart)",
     kafkaEarliest: "Ən erkən mesajlar",
     kafkaOffset: "Sürüşmədən başlayaraq",
+    kafkaTimestamp: "Vaxtdan oxu",
+    startTimestamp: "Başlanğıc vaxtı",
+    timestampRequired: "Bir başlanğıc vaxtı seçin və ya başqa başlanğıc mövqe göstərin.",
     timeOrder: "Vaxta görə sıralama",
     newestFirst: "Əvvəlcə ən yenilər",
     oldestFirst: "Əvvəlcə ən köhnələr",

@@ -10,7 +10,7 @@ import type { PluginUiStorageItemRef, SqlFileFailureLogExportPayload, SqlFileFai
 import { FAILURE_LOG_TEXT_TOO_LARGE } from "@/lib/export/failureLogExport";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWire, schemaDiffPreparationToWire, type FunctionInfoWire, type SchemaDiffPreparationWire } from "./functionInfoTransport";
-import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan } from "@/types/schemaDiff";
+import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions } from "@/types/schemaDiff";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return post("/api/database-backups", command);
@@ -48,6 +48,14 @@ import type {
   CompletionAssistantResponse,
   ObjectStatistics,
   CustomTypeDetails,
+  OracleTypeManagementSnapshot,
+  OracleTypeManagementObjectKey,
+  OracleTypeManagementSqlInput,
+  OracleTypeManagementSqlResult,
+  OracleTypeDataRequest,
+  OracleTypeDataResult,
+  OracleTypeEvolutionRequest,
+  OracleTypeEvolutionManifest,
   ObjectSource,
   ObjectSourceKind,
   MysqlEventInfo,
@@ -238,7 +246,16 @@ import type {
 } from "@/lib/dataGrid/dataGridSql";
 import type { DmlChangePreviewSqlOptions, DmlChangePreviewSqlResult } from "@/lib/sql/dmlChangePreview";
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
-import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
+import type {
+  BuildCreatePartitionedTableSqlOptions,
+  BuildTableOwnerChangeSqlOptions,
+  BuildTableStructureChangeSqlOptions,
+  BuildSingleColumnAlterSqlOptions,
+  MysqlTableCharsetChange,
+  SqliteTableStructureChangePreview,
+  TablePartitionSqlOptions,
+  TableStructureChangeSql,
+} from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
@@ -1222,19 +1239,31 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return schemas.map((name) => ({ name, comment: null }));
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: TableNameFilter): Promise<TableInfo[]> {
-  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined })}`);
+export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: TableNameFilter, exactIdentity?: boolean): Promise<TableInfo[]> {
+  return get(`/api/schema/tables?${qs({ connection_id: connectionId, database, schema, filter, limit, offset, object_types: objectTypes?.join(","), catalog, table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined, exact_identity: exactIdentity || undefined })}`);
 }
 
-export async function getTableComment(_connectionId: string, _database: string, _schema: string, _table: string, _catalog?: string): Promise<string | null> {
-  throw new Error("Table comment lookup is not available in the web backend");
+export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
+  return get(`/api/schema/table-comment?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
 
 export async function getMysqlTableAutoIncrement(connectionId: string, database: string, table: string): Promise<string | null> {
   return get(`/api/schema/mysql/auto-increment?${qs({ connection_id: connectionId, database, table })}`);
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: TableNameFilter, executionId?: string): Promise<ObjectInfo[]> {
+export async function listObjects(
+  connectionId: string,
+  database: string,
+  schema: string,
+  objectTypes?: (SidebarObjectKind | "EVENT")[],
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  catalog?: string,
+  tableNameFilter?: TableNameFilter,
+  executionId?: string,
+  exactIdentity?: boolean,
+): Promise<ObjectInfo[]> {
   return get(
     `/api/schema/objects?${qs({
       connection_id: connectionId,
@@ -1247,6 +1276,7 @@ export async function listObjects(connectionId: string, database: string, schema
       catalog,
       table_name_filter: tableNameFilter ? JSON.stringify(tableNameFilter) : undefined,
       execution_id: executionId,
+      exact_identity: exactIdentity || undefined,
     })}`,
   );
 }
@@ -1275,8 +1305,22 @@ export async function getCustomTypeDetails(connectionId: string, database: strin
   return get(`/api/schema/custom-type-details?${qs({ connection_id: connectionId, database, schema, table: name })}`);
 }
 
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
-  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId, current_schema: currentSchema })}`);
+export async function getOracleTypeManagementSnapshot(connectionId: string, database: string, owner: string, name: string, knownObjects: OracleTypeManagementObjectKey[] = []): Promise<OracleTypeManagementSnapshot> {
+  if (knownObjects.length) return post("/api/schema/oracle-type-management-snapshot", { target: { connectionId, database, owner, name }, knownObjects });
+  return get(`/api/schema/oracle-type-management-snapshot?${qs({ connection_id: connectionId, database, schema: owner, table: name })}`);
+}
+export function buildOracleTypeManagementSql(input: OracleTypeManagementSqlInput): Promise<OracleTypeManagementSqlResult> {
+  return post("/api/query/build-oracle-type-management-sql", input);
+}
+export function verifyOracleTypeData(input: OracleTypeDataRequest): Promise<OracleTypeDataResult> {
+  return post("/api/schema/oracle-type-data", input);
+}
+export function prepareOracleTypeEvolution(input: OracleTypeEvolutionRequest): Promise<OracleTypeEvolutionManifest> {
+  return post("/api/schema/oracle-type-evolution", input);
+}
+
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string, exactIdentity?: boolean): Promise<ColumnInfo[]> {
+  return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table, catalog, client_session_id: clientSessionId, current_schema: currentSchema, exact_identity: exactIdentity || undefined })}`);
 }
 
 export async function getPluginTableMetadata(request: PluginTableMetadataRequest): Promise<PluginTableMetadata> {
@@ -1301,8 +1345,8 @@ export async function listDataTypes(connectionId: string, database: string): Pro
   return get(`/api/schema/data-types?${qs({ connection_id: connectionId, database })}`);
 }
 
-export async function listIndexes(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<IndexInfo[]> {
-  return get(`/api/schema/indexes?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function listIndexes(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<IndexInfo[]> {
+  return get(`/api/schema/indexes?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
 
 export async function listReferenceKeyColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string[]> {
@@ -1313,20 +1357,20 @@ export async function listReferenceKeys(connectionId: string, database: string, 
   return get(`/api/schema/reference-keys?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
-export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ForeignKeyInfo[]> {
-  return get(`/api/schema/foreign-keys?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<ForeignKeyInfo[]> {
+  return get(`/api/schema/foreign-keys?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
 
 export async function listForeignKeysForDatabase(connectionId: string, database: string, schema: string, catalog?: string, executionId?: string): Promise<Record<string, ForeignKeyInfo[]>> {
   return get(`/api/schema/foreign-keys-for-database?${qs({ connection_id: connectionId, database, schema, catalog, execution_id: executionId })}`);
 }
 
-export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
-  return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<TriggerInfo[]> {
+  return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
 
-export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
-  return get(`/api/schema/constraints?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<ConstraintInfo[]> {
+  return get(`/api/schema/constraints?${qs({ connection_id: connectionId, database, schema, table, catalog, exact_identity: exactIdentity || undefined })}`);
 }
 
 export async function listPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<PartitionInfo[]> {
@@ -1355,12 +1399,12 @@ export async function listSubpartitions(connectionId: string, database: string, 
   return get(`/api/schema/subpartitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, portable })}`);
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false, exactIdentity?: boolean, separateIndexes?: boolean): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, portable, exact_identity: exactIdentity || undefined, separate_indexes: separateIndexes || undefined })}`);
 }
 
-export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
-  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, include_postgres_access: true })}`);
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, separateIndexes?: boolean): Promise<string> {
+  return get(`/api/schema/ddl?${qs({ connection_id: connectionId, database, schema, table, object_type: objectType, catalog, include_postgres_access: true, separate_indexes: separateIndexes || undefined })}`);
 }
 
 export async function prepareSchemaDiff(options: SchemaDiffPreparationOptions): Promise<SchemaDiffPreparation> {
@@ -1392,8 +1436,10 @@ export async function listFunctions(connectionId: string, database: string, sche
   return (await get<FunctionInfoWire[]>(`/api/schema/functions?${qs({ connection_id: connectionId, database, schema })}`)).map(functionInfoFromWire);
 }
 
-export function loadSchemaDiffRoutines(connectionId: string, database: string, schema: string, selectedRoutines?: string[]): Promise<OracleRoutineSnapshot> {
-  return get(`/api/schema/diff-routines?${qs({ connection_id: connectionId, database, schema, selected_routines: selectedRoutines === undefined ? undefined : JSON.stringify(selectedRoutines) })}`);
+export function loadSchemaDiffRoutines(connectionId: string, database: string, schema: string, selectedRoutines?: string[], options?: OracleRoutineReadOptions): Promise<OracleRoutineSnapshot> {
+  return get(
+    `/api/schema/diff-routines?${qs({ connection_id: connectionId, database, schema, selected_routines: selectedRoutines === undefined ? undefined : JSON.stringify(selectedRoutines), object_kinds: options?.objectKinds === undefined ? undefined : JSON.stringify(options.objectKinds), selected_objects: options?.selectedObjects === undefined ? undefined : JSON.stringify(options.selectedObjects) })}`,
+  );
 }
 
 export function prepareOracleRoutineSave(input: OracleRoutineSaveInput): Promise<OracleRoutineOperation> {
@@ -1540,6 +1586,7 @@ export async function executeConditionalUpdate(
     clientSessionId?: string;
     timeoutSecs?: number;
     executionMode?: "simple" | "postgres_read_only_transaction";
+    typeRecovery?: import("@/types/database").TypeRecoveryContext;
   },
 ): Promise<QueryResult> {
   return post("/api/query/execute-conditional-update", {
@@ -1567,6 +1614,7 @@ export async function executeMulti(
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
+    deferLobs?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1623,6 +1671,7 @@ export async function executeMultiWithProgress(
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
+    deferLobs?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1715,7 +1764,8 @@ export async function exportSnapshotResult(request: SnapshotExportRequest, fileP
   anchor.click();
 }
 
-export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string, txnSessionId?: string): Promise<boolean> {
+  if (txnSessionId) throw new Error("Manual transaction management is only available in the desktop app.");
   return post("/api/query/close-session", {
     connectionId,
     database,
@@ -1793,6 +1843,7 @@ export async function executeInManualTransaction(
   _executionId?: string,
   _timeoutSecs?: number,
   _boundStatements?: BlobBoundStatement[],
+  _deferLobs?: boolean,
 ): Promise<QueryResult[]> {
   throw new Error("Manual transaction management is only available in the desktop app.");
 }
@@ -1817,10 +1868,11 @@ export async function cancelQuery(executionId: string): Promise<boolean> {
 export interface ConditionalUpdateCancellationResult {
   requested: boolean;
   terminal: boolean;
+  databaseTerminal?: boolean;
 }
 
-export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
-  return post("/api/query/cancel-conditional-update", { executionId });
+export async function cancelConditionalUpdate(executionId: string, options?: { cancel?: boolean; typeRecovery?: import("@/types/database").TypeExecutionBinding }): Promise<ConditionalUpdateCancellationResult> {
+  return post("/api/query/cancel-conditional-update", { executionId, ...options });
 }
 
 export async function analyzeSqlReferences(sql: string, dialect?: string): Promise<SqlReferenceAnalysis> {
@@ -2062,8 +2114,8 @@ export async function reviewOracleViewRenameSource(input: OracleViewRenameSource
   return post("/api/query/review-oracle-view-rename-source", { input });
 }
 
-export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions): Promise<TableStructureChangeSql> {
-  return post("/api/query/build-table-structure-change-sql", { options, starrocks });
+export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions, mysqlTableCharset?: MysqlTableCharsetChange): Promise<TableStructureChangeSql> {
+  return post("/api/query/build-table-structure-change-sql", { options, starrocks, mysqlTableCharset });
 }
 
 export async function buildTableOwnerChangeSql(options: BuildTableOwnerChangeSqlOptions): Promise<TableStructureChangeSql> {
@@ -3080,6 +3132,10 @@ export interface SqlFileEntry {
 
 export async function listSqlFilesInFolder(_folderPath: string, _fileFilter?: string, _includeEmptyDirectories?: boolean): Promise<SqlFileEntry[]> {
   throw new Error("Listing SQL files in a folder is only available in the desktop app");
+}
+
+export async function searchSqlFileContents(_roots: string[], _query: string, _fileFilter?: string): Promise<import("@/lib/backend/tauri").SqlFileContentSearchResult> {
+  throw new Error("Searching SQL file contents is only available in the desktop app");
 }
 
 export async function createSqlFileInFolder(_rootPath: string, _directoryPath: string, _fileName: string): Promise<string> {

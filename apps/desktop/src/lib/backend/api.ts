@@ -227,6 +227,10 @@ export const completionAssistantSearch = forward("completionAssistantSearch");
 export const getObjectSource = forward("getObjectSource");
 export const getEventInfo = forward("getEventInfo");
 export const getCustomTypeDetails = forward("getCustomTypeDetails");
+export const getOracleTypeManagementSnapshot = forward("getOracleTypeManagementSnapshot");
+export const buildOracleTypeManagementSql = forward("buildOracleTypeManagementSql");
+export const verifyOracleTypeData = forward("verifyOracleTypeData");
+export const prepareOracleTypeEvolution = forward("prepareOracleTypeEvolution");
 export const getColumns = forward("getColumns");
 export const getPluginTableMetadata = forward("getPluginTableMetadata");
 export const getAllColumns = forward("getAllColumns");
@@ -519,6 +523,7 @@ export const inspectExternalSqlFile = forward("inspectExternalSqlFile");
 export const writeExternalSqlFile = forward("writeExternalSqlFile");
 export const saveExternalSqlFile = forward("saveExternalSqlFile");
 export const listSqlFilesInFolder = forward("listSqlFilesInFolder");
+export const searchSqlFileContents = forward("searchSqlFileContents");
 export const globalSearch = forward("globalSearch");
 export const loadGlobalSearchSettings = forward("loadGlobalSearchSettings");
 export const saveGlobalSearchSettings = forward("saveGlobalSearchSettings");
@@ -1164,6 +1169,9 @@ export type {
   SqlFileTable,
   SqlFileProgress,
   TransferRequest,
+  OraclePackageTransferRequest,
+  OraclePackageTransferPreview,
+  OraclePackagePendingTables,
   TransferProgress,
   TransferMode,
   TransferContent,
@@ -1212,6 +1220,8 @@ export type {
   QueryResultExportRequest,
   AgentEvent,
   SqlFileEntry,
+  SqlFileContentMatch,
+  SqlFileContentSearchResult,
   GlobalSearchRequest,
   GlobalSearchMatch,
   GlobalSearchSettings,

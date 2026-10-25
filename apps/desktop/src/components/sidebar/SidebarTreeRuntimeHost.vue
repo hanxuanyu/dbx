@@ -15,6 +15,8 @@ import { canDropDatabaseNode, notifyDatabaseBrowserMutation } from "@/lib/databa
 import { canDropDatabaseTables, canEmptyDatabaseTables, useDatabaseTableEmpty } from "@/composables/useDatabaseTableEmpty";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
+import { normalizeBackendError } from "@/lib/backend/errorUtils";
+import { isConnectionTimeoutErrorMessage } from "@/lib/sql/queryError";
 import {
   Ban,
   BarChart3,
@@ -162,8 +164,10 @@ import {
   treeNodeRowAction,
   treeNodeRowDoubleClickAction,
 } from "@/lib/sidebar/treeNodeClick";
+import { customTypeCapabilities, supportsOracleFamilyTypeManagement, supportsOracleTypeAttributeExpansion, supportsTypeObjectSource, supportsSchemaIndexManagement } from "@/lib/database/databaseObjectCapabilities";
+import { requestOracleTypeManagement } from "@/lib/table/oracleTypeManagementRequest";
 import { qualifiedNameForSidebarNode } from "@/lib/sidebar/sidebarTableNameCopy";
-import { customTypeCapabilities, supportsTypeObjectSource } from "@/lib/database/databaseObjectCapabilities";
+import { schemaIndexIsSameOwner, schemaIndexNodeIdentity } from "@/lib/table/schemaIndexNavigation";
 import { mongoCollectionTableTypeFromNode, mongoCreateDatabasePreview, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isDisconnectSidebarConnectionShortcut, isEditSidebarConnectionShortcut, isEditSidebarTableStructureShortcut, isModRShortcut, isPasteSidebarSelectionShortcut, isRefreshDataShortcut } from "@/lib/editor/keyboardShortcuts";
@@ -202,11 +206,12 @@ import { executeOceanbaseTableClone, executeOceanbaseTableCloneData, oceanbaseCl
 import type { DuplicateTableStructurePlan } from "@/lib/database/dbAdminSql";
 import { useOceanbaseCloneDialog } from "@/composables/useOceanbaseCloneDialog";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { redisFlushDbPreview } from "@/lib/redis/redisCommandPreview";
 import { buildRenameObjectSql, buildRenameDatabaseSql, buildRenameDatabasePreflightSql, databaseRenameMaintenanceDatabase, supportsDatabaseRename, supportsObjectRename, type RenameableObjectType } from "@/lib/table/objectRenameSql";
 import { prepareOracleViewRename, executeOracleViewRename, OracleViewRenameFailure, type OracleViewRenamePlan } from "@/lib/table/oracleViewRename";
 import { prepareOracleRoutineRename, executeOracleRoutineRename, OracleRoutineRenameFailure, type OracleRoutineRenamePlan } from "@/lib/table/oracleRoutineRename";
 import { prepareOracleTableRename, executeOracleTableRename, OracleTableRenameFailure, type OracleTableRenamePlan } from "@/lib/table/oracleTableRename";
-import { executeOraclePackageSaveAs, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
+import { prepareOraclePackageSaveAsExecution, OraclePackageSaveAsFailure, prepareOraclePackageSaveAs, type OraclePackageSaveAsPlan } from "@/lib/table/oraclePackageSaveAs";
 import { buildRoutineRenameObjectSourceStatements, executeObjectSourceSave, supportsSourceBackedRoutineRename } from "@/lib/table/objectSourceEditor";
 import { freezeSourceIdentities } from "@/lib/table/objectSourceIdentity";
 import { buildViewDdl } from "@/lib/table/viewDdl";
@@ -546,6 +551,7 @@ const emit = defineEmits<{
   "open-object-source": [node: TreeNode, initialEditing: boolean, initialSection?: ObjectDetailsSection];
   "open-procedure": [node: TreeNode];
   "open-settings": [initialTab: string];
+  "open-connection-settings": [connectionId: string];
   "open-data": [node: TreeNode, requireSelection: boolean, openMode: DataTabOpenMode, runner: (node: TreeNode, request: SidebarDataOpenRequest) => Promise<void>];
   "open-visible-databases": [node: TreeNode];
   "open-visible-schemas": [node: TreeNode];
@@ -824,6 +830,7 @@ function hasNodeDatabaseContext(node: TreeNode): node is TreeNode & { connection
 const groupTypes: Set<TreeNodeType> = new Set([
   "group-columns",
   "group-indexes",
+  "group-database-indexes",
   "group-fkeys",
   "group-triggers",
   "group-events",
@@ -898,7 +905,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       if (!isCurrentNavigationRequest(requestId)) return;
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(errMsg, node);
     }
     return;
@@ -953,7 +960,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     return;
   }
 
-  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined) {
+  if (node.type === "type" && customTypeCapabilities(currentDatabaseType()).details && node.children !== undefined && node.hasMembers !== undefined) {
     node.isExpanded = node.children.length > 0 ? !node.isExpanded : false;
     if (!node.isExpanded) collapseSubtreeDescendants(node);
     emitNodeToggled(node, wasExpanded);
@@ -1040,7 +1047,7 @@ async function toggle(requestId = beginNavigationRequest()) {
       }
       const errMsg = e?.message || String(e);
       if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(errMsg);
     }
     return;
@@ -1233,7 +1240,7 @@ async function toggle(requestId = beginNavigationRequest()) {
     if (!wasExpanded) node.isExpanded = false;
     const errMsg = e?.message || String(e);
     if (errMsg.includes(CONNECTION_ATTEMPT_CANCELLED_MESSAGE)) return;
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(errMsg);
   }
 }
@@ -1319,13 +1326,22 @@ function openDriverStoreForInstallError(errMsg: string, node: TreeNode = activeN
   if (focus) window.dispatchEvent(new CustomEvent("dbx-open-driver-store", { detail: focus }));
 }
 
+// 连接/取数失败的统一 toast（issue #13233）：命中「连接超时」类错误时附带「修改超时时间」
+// 动作，点击后经 open-connection-settings 事件链打开该连接的编辑对话框高级页（与查询结果
+// 错误区的同名入口一致）。非超时错误保持原有纯提示行为，不带动作。
+function toastConnectFailed(connectionId: string | undefined, error: unknown) {
+  const rawMessage = (error as { message?: string } | undefined)?.message || String(error);
+  const action = connectionId && isConnectionTimeoutErrorMessage(rawMessage, normalizeBackendError(error) ?? undefined) ? { label: t("editor.changeConnectionTimeout"), onClick: () => emit("open-connection-settings", connectionId) } : undefined;
+  toast(t("connection.connectFailed", { message: translateBackendError(t, error) }), 5000, action);
+}
+
 async function loadMoreObjectGroupChildren() {
   const node = activeNode.value;
   const searchFilter = node.loadMore?.parentId ? connectionStore.sidebarTableSearchQueries[node.loadMore.parentId]?.trim() || "" : "";
   try {
     await connectionStore.loadMoreObjectGroupChildren(node, { searchFilter });
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -1334,7 +1350,7 @@ async function loadAllObjectGroupChildren() {
   try {
     await connectionStore.loadAllObjectGroupChildren(node);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -1982,9 +1998,50 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
       await toggle();
     }
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
+}
+
+function isSchemaIndexNode(node: TreeNode): boolean {
+  return node.type === "index" && node.objectScope === "schema";
+}
+
+function canEditSchemaIndex(node: TreeNode): boolean {
+  return !!node.connectionId && !!node.database && supportsSchemaIndexManagement(databaseTypeForNode(node)) && schemaIndexIsSameOwner(schemaIndexNodeIdentity(node)) && !connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId));
+}
+
+function openSchemaIndexInfo(node: TreeNode) {
+  const target = schemaIndexNodeIdentity(node);
+  if (!target || !node.connectionId || !node.database || !supportsSchemaIndexManagement(databaseTypeForNode(node))) return;
+  queryStore.openObjectBrowser(node.connectionId, node.database, target.schema, node.catalog, undefined, false, "indexes", undefined, { view: target });
+}
+
+async function openSchemaIndexCreate() {
+  const node = activeNode.value;
+  if (node.type !== "group-database-indexes" || !node.connectionId || !node.database || !supportsSchemaIndexManagement(databaseTypeForNode(node)) || connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId))) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, undefined, false, "indexes", undefined, { create: true });
+  } catch (error) {
+    toast(translateBackendError(t, error), 5000);
+  }
+}
+
+function requestSchemaIndexDelete(node: TreeNode): boolean {
+  const target = schemaIndexNodeIdentity(node);
+  if (!canEditSchemaIndex(node) || !target || !node.connectionId || !node.database) return false;
+  queryStore.openTableStructure(node.connectionId, node.database, target.parentSchema, target.parentName, "indexes", { kind: "index", name: target.name, owner: target.schema, action: "delete" }, node.catalog, "table", true);
+  return true;
+}
+
+function hasSchemaIndexBatchSelection(): boolean {
+  const selected = selectedTreeNodesInVisibleOrder();
+  return selected.length > 1 && selected.some((node) => node.id === activeNode.value.id) && selected.some(isSchemaIndexNode);
+}
+
+function explainIndividualIndexEditing() {
+  toast(t("schemaIndex.editIndividually"), 4000);
 }
 
 // 每次"新建事件"菜单点击都会分配一个单调递增的请求号，保证同一个
@@ -2003,7 +2060,7 @@ async function openDatabaseBrowser() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDatabaseBrowser(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
 }
@@ -2020,7 +2077,7 @@ async function openProfileDatabaseWorkspace() {
     const target = workspace.resolveTarget?.(node.database, "database") ?? { database: node.database };
     queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2039,7 +2096,7 @@ async function openProfileConnectionWorkspace() {
     const target = workspace.resolveTarget?.(database, "connection") ?? { database };
     queryStore.openDriverProfileWorkspace(node.connectionId, target.database, t(workspace.tabTitleKey), workspace.mode, workspace.tabScope, target.branch);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2051,7 +2108,7 @@ async function openUserAdmin() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openUserAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2063,7 +2120,7 @@ async function openXuguUserPermissions() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openXuguUserAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toastConnectFailed(node.connectionId, e?.message || String(e));
   }
 }
 
@@ -2075,7 +2132,7 @@ async function openProcessList() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openProcessList(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2087,7 +2144,7 @@ async function openSqlServerActivityTrace() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openSqlServerActivityTrace(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2109,7 +2166,7 @@ async function openServerDashboard() {
       queryStore.openMysqlDashboard(node.connectionId);
     }
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2121,7 +2178,7 @@ async function openDamengUsers() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengUsers(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2133,7 +2190,7 @@ async function openDamengRoles() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengRoles(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2145,7 +2202,7 @@ async function openDamengJobAdmin() {
     connectionStore.activeConnectionId = node.connectionId;
     queryStore.openDamengJobAdmin(node.connectionId);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
   }
 }
 
@@ -2188,6 +2245,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          defaultSchema: config?.default_schema,
           quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
           tableName: node.label,
@@ -2207,7 +2265,7 @@ async function newQuery(options: { reuseQueryTabByScope?: boolean } = {}) {
     if (openDefault) await queryStore.openDefaultQuery({ connectionId: node.connectionId, database });
     else queryStore.createTab(node.connectionId, database, undefined, "query", connection.default_schema);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e));
   }
 }
@@ -2255,7 +2313,7 @@ async function loadTemplateContext(allowView = false, node: TreeNode = activeNod
   }
 
   const identifierQuote = connectionStore.connectionIdentifierQuote(node.connectionId);
-  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType };
+  return { node, dbType, driverProfile: config?.driver_profile, identifierQuote, tableSchema, columns, tableType, defaultSchema: config?.default_schema };
 }
 
 type TableTemplateContext = NonNullable<Awaited<ReturnType<typeof loadTemplateContext>>>;
@@ -2290,6 +2348,7 @@ async function newSelectTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
             tableName: context.node.label,
@@ -2310,6 +2369,7 @@ async function newSelectTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       tableName: context.node.label,
@@ -2317,7 +2377,7 @@ async function newSelectTemplate() {
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2363,6 +2423,7 @@ function insertTemplateOptions(context: TableTemplateContext, rowCount: number) 
     database: context.node.database,
     schema: context.tableSchema,
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    defaultSchema: context.defaultSchema,
     quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
     tableName: context.node.label,
     columns: context.columns,
@@ -2389,7 +2450,7 @@ async function runInsertTemplate(rowCount: number, prefetchedContexts?: TableTem
     const title = contexts.length === 1 ? undefined : `INSERT - ${contexts.map((context) => context.node.label).join(", ")}`;
     openSqlTemplateTab(tabTarget.connectionId!, tabTarget.database!, tabTarget.schema, tabTarget.catalog, sql, title);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2408,6 +2469,7 @@ async function newUpdateTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2427,13 +2489,14 @@ async function newUpdateTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2452,6 +2515,7 @@ async function newDeleteTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            defaultSchema: context.defaultSchema,
             quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
@@ -2471,13 +2535,14 @@ async function newDeleteTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      defaultSchema: context.defaultSchema,
       quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
     openSqlTemplateTab(context.node.connectionId!, context.node.database!, context.node.schema, context.node.catalog, sql);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(activeNode.value.connectionId, e);
   }
 }
 
@@ -2645,7 +2710,7 @@ async function refresh() {
         toast(t("connection.objectCacheRefreshFailed", { message: translateBackendError(t, e) }), 5000);
         return;
       }
-      toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+      toastConnectFailed(node.connectionId, e);
       openDriverStoreForInstallError(e?.message || String(e), node);
     }
     return;
@@ -2653,7 +2718,7 @@ async function refresh() {
   try {
     await connectionStore.refreshTreeNode(node);
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
+    toastConnectFailed(node.connectionId, e);
     openDriverStoreForInstallError(e?.message || String(e), node);
   }
 }
@@ -2916,6 +2981,8 @@ function dropTableChildObjectSqlOptions(): DropTableChildObjectSqlOptions | null
 }
 
 function dropTableChildObjectSqlOptionsForNode(node: TreeNode): DropTableChildObjectSqlOptions | null {
+  // Schema indexes must use the structure editor's preflight and readback.
+  if (isSchemaIndexNode(node)) return null;
   const objectType = tableChildDropObjectType(node.type);
   if (!objectType || !node.tableName) return null;
   const name = tableChildDropObjectName(node).trim();
@@ -3008,8 +3075,8 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
   if (!node.connectionId || !node.database) return;
   if (viewPackageBody && (node.type !== "package" || node.xuguPackageBodyAvailable !== true || currentDatabaseType() !== "xugu")) return;
   const sourceNode: TreeNode = viewPackageBody ? { ...node, type: "package-body" } : node;
-  // TYPE/TYPE_BODY only have a source implementation on Xugu; PostgreSQL-family
-  // connections list user-defined types without a CREATE TYPE getter this cycle.
+  // TYPE/TYPE_BODY source is available for Oracle-family databases and Xugu;
+  // PostgreSQL-family connections list user-defined types without a getter.
   if ((sourceNode.type === "type" || sourceNode.type === "type-body") && !supportsTypeObjectSource(currentDatabaseType())) return;
   const connectionId = node.connectionId;
   const database = node.database;
@@ -3048,6 +3115,19 @@ async function openDatabaseObjectDependencies() {
   if (currentDatabaseType() === "oracle" || currentDatabaseType() === "oceanbase-oracle") {
     const target = oracleTarget(node);
     if (!target) return;
+    const connection = connectionStore.getConfig(node.connectionId);
+    const propertyDatabase = connection && node.schema && connectionUsesVisibleSchemaFilter(connection) ? connection.database || node.database : node.database;
+    if (target.type === "TABLE" || target.type === "VIEW" || target.type === "MATERIALIZED_VIEW") {
+      queryStore.openObjectProperties({ connectionId: node.connectionId, database: propertyDatabase, catalog: node.catalog, schema: target.schema, name: target.name, objectType: target.type, initialTab: "relations" });
+      return;
+    }
+    // TYPE lifecycle belongs to its dedicated integration; do not bypass its source guard.
+    if (target.type === "TYPE" || target.type === "TYPE_BODY") return;
+    if (target.type === "INDEX") {
+      if (node.parentName && node.parentSchema)
+        queryStore.openObjectProperties({ connectionId: node.connectionId, database: propertyDatabase, catalog: node.catalog, schema: node.parentSchema, name: node.parentName, objectType: "TABLE", initialTab: "relations", focusObject: { owner: target.schema, name: target.name, type: "INDEX" } });
+      return;
+    }
     openObjectSourceDialog(false, false, { ...node, type: target.type.toLowerCase() as "procedure" | "function" | "package", schema: target.schema, objectName: target.name, label: target.name, parentType: undefined, parentName: undefined, parentSchema: undefined });
     return;
   }
@@ -3227,11 +3307,56 @@ function triggerToggleMenuItems(node: TreeNode): ContextMenuItem[] {
 }
 
 function requestDropObject() {
+  if (isManagedTypeNode(activeNode.value)) {
+    void manageTypeDropNode(activeNode.value);
+    return;
+  }
   void refreshDropObjectPreviewSql();
   showDropObjectConfirm.value = true;
 }
 
+function isManagedTypeNode(node: TreeNode) {
+  return (node.type === "type" || node.type === "type-body") && supportsOracleFamilyTypeManagement(databaseTypeForNode(node));
+}
+
+async function manageTypeDropNode(node: TreeNode): Promise<boolean> {
+  if (!node.connectionId || !node.database || !isManagedTypeNode(node)) return false;
+  const connectionId = node.connectionId,
+    database = node.database,
+    owner = node.schema || database,
+    name = node.objectName || node.label;
+  const databaseType = databaseTypeForNode(node) as "oracle" | "oceanbase-oracle" | "dameng";
+  const activeId = activeNode.value.id;
+  try {
+    const result = await requestOracleTypeManagement({
+      target: { connectionId, database, owner, name, databaseType },
+      operation: node.type === "type-body" ? "delete-body" : "delete-spec",
+      isCurrent: () => activeNode.value.id === activeId && databaseTypeForNode(node) === databaseType && !!connectionStore.getConfig(connectionId),
+    });
+    if (!result.complete) return false;
+    const removed: TreeNode[] = [node];
+    const visit = (nodes: TreeNode[]) => {
+      for (const item of nodes) {
+        if (item.connectionId === connectionId && item.database === database && (item.schema || database) === owner && (item.objectName || item.label) === name && (item.type === node.type || (node.type === "type" && item.type === "type-body"))) removed.push(item);
+        if (item.children) visit(item.children);
+      }
+    };
+    visit(connectionStore.treeNodes);
+    connectionStore.removePinnedTreeNodes(removed);
+    for (const item of removed) connectionStore.removeTreeNode(item.id);
+    releaseActiveNodeReference(removed.map((item) => item.id));
+    return true;
+  } catch (error) {
+    toast(t("contextMenu.tableOperationFailed", { message: String(error) }), 5000);
+    return false;
+  }
+}
+
 function requestDropTableChildObject() {
+  if (isSchemaIndexNode(activeNode.value)) {
+    requestSchemaIndexDelete(activeNode.value);
+    return;
+  }
   if (!canDropTableChildObject.value) return;
   void refreshDropTableChildObjectPreviewSql();
   showDropTableChildObjectConfirm.value = true;
@@ -3240,6 +3365,7 @@ function requestDropTableChildObject() {
 function canDropTreeNode(node: TreeNode): boolean {
   if (["neo4j", "nebula"].includes(databaseTypeForNode(node) || "")) return false;
   if (isSqlServerLinkedNode(node)) return false;
+  if (isManagedTypeNode(node)) return !!node.connectionId && !!node.database;
   if (node.type === "table") return !!node.connectionId && !!node.database;
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function" || node.type === "event") {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
@@ -3379,6 +3505,7 @@ function batchTruncateConfirmMessage(): string {
 }
 
 async function dropSqlForTreeNode(node: TreeNode, options?: { cascade?: boolean }): Promise<string | null> {
+  if (isManagedTypeNode(node)) throw new Error(t("objects.typeManagementUseSave"));
   if (node.type === "table" && node.connectionId && node.database) {
     const config = connectionStore.getConfig(node.connectionId);
     return buildDropTableSql({
@@ -3455,8 +3582,29 @@ async function refreshBatchEmptyPreviewSql(targets: TreeNode[]) {
 }
 
 function requestBatchDrop() {
+  if (hasSchemaIndexBatchSelection()) {
+    explainIndividualIndexEditing();
+    return;
+  }
   const targets = selectedBatchDropTargets();
   if (!targets.length) return;
+  const managed = targets.filter(isManagedTypeNode);
+  if (managed.length) {
+    void (async () => {
+      const unique = managed.filter(
+        (node) => node.type !== "type-body" || !managed.some((other) => other.type === "type" && other.connectionId === node.connectionId && other.database === node.database && other.schema === node.schema && (other.objectName || other.label) === (node.objectName || node.label)),
+      );
+      for (const node of unique) if (!(await manageTypeDropNode(node))) return;
+      const remaining = targets.filter((node) => !managed.includes(node));
+      if (!remaining.length) return;
+      batchDropTargets.value = remaining;
+      batchDropCascade.value = false;
+      batchDropProgress.value = { completed: 0, total: 0 };
+      await refreshBatchDropPreviewSql();
+      showBatchDropConfirm.value = true;
+    })().catch((error) => toast(t("contextMenu.tableOperationFailed", { message: String(error) }), 5000));
+    return;
+  }
   batchDropTargets.value = targets.slice();
   batchDropCascade.value = false;
   batchDropProgress.value = { completed: 0, total: 0 };
@@ -3571,6 +3719,10 @@ async function confirmBatchMysqlAutoIncrement() {
 }
 
 function requestDropSelectedNodes(): boolean {
+  if (hasSchemaIndexBatchSelection()) {
+    explainIndividualIndexEditing();
+    return true;
+  }
   const selected = selectedTreeNodesInVisibleOrder();
   if (selected.length > 1 && selected.some((node) => node.id === activeNode.value.id)) {
     if (!selectedBatchDropTargets().length) return false;
@@ -3581,12 +3733,13 @@ function requestDropSelectedNodes(): boolean {
 }
 
 function requestDropSelectedNode(): boolean {
+  if (isSchemaIndexNode(activeNode.value)) return requestSchemaIndexDelete(activeNode.value);
   if (["neo4j", "nebula"].includes(currentDatabaseType() || "")) return false;
   if (activeNode.value.type === "table") {
     dropTable();
     return true;
   }
-  if (activeNode.value.type === "view" || activeNode.value.type === "procedure" || activeNode.value.type === "function") {
+  if (isManagedTypeNode(activeNode.value) || activeNode.value.type === "view" || activeNode.value.type === "procedure" || activeNode.value.type === "function") {
     requestDropObject();
     return true;
   }
@@ -4004,24 +4157,14 @@ async function confirmPackageSaveAs() {
       packageSaveAsName.value.trim() === plan.target.newName
     );
   };
+  let prepared: Awaited<ReturnType<typeof prepareOraclePackageSaveAsExecution>> | undefined;
   try {
     await connectionStore.ensureConnected(target.connectionId);
+    prepared = await prepareOraclePackageSaveAsExecution(plan, isCurrentPlan);
+    const execute = prepared;
     const executed = await executeTreeNodeSqlWithProductionGuard(target, plan.statements.join("\n\n"), {
       execute: async () => {
-        await executeOraclePackageSaveAs(plan, () => {
-          const current = packageSaveAsTarget.value;
-          return (
-            packageSaveAsPlan.value === plan &&
-            packageSaveAsOpen.value &&
-            !!current &&
-            current.connectionId === plan.target.connectionId &&
-            current.database === plan.target.database &&
-            (current.schema || current.database) === plan.target.schema &&
-            (current.objectName || current.label) === plan.target.oldName &&
-            packageSaveAsName.value.trim() === plan.target.newName &&
-            databaseTypeForNode(current) === plan.target.databaseType
-          );
-        });
+        await execute();
         return { columns: [], rows: [], affected_rows: 0, execution_time_ms: 0 };
       },
     });
@@ -4043,6 +4186,7 @@ async function confirmPackageSaveAs() {
       }
     }
   } finally {
+    await prepared?.dispose();
     packageSaveAsExecuting.value = false;
   }
 }
@@ -4265,6 +4409,10 @@ async function confirmRenameObject() {
 
 async function confirmDropObject() {
   const node = sidebarDangerTarget.value ?? activeNode.value;
+  if (isManagedTypeNode(node)) {
+    await manageTypeDropNode(node);
+    return;
+  }
   if (!node.connectionId || !node.database) return;
   const options = dropObjectSqlOptionsForNode(node);
   if (!options) return;
@@ -4312,6 +4460,11 @@ async function confirmDropTableChildObject() {
 async function confirmBatchDrop() {
   const targets = batchDropTargets.value.slice();
   if (!targets.length) return;
+  if (targets.some(isSchemaIndexNode)) {
+    showBatchDropConfirm.value = false;
+    explainIndividualIndexEditing();
+    return;
+  }
   try {
     const mongoIndexTargets = targets.filter(canDropMongoIndexNode);
     if (mongoIndexTargets.length) {
@@ -5784,7 +5937,7 @@ function createSidebarObjectTemplate() {
 
 const canExpand = computed(() => {
   if (activeNode.value.type === "type" && customTypeCapabilities(currentDatabaseType()).details) {
-    return activeNode.value.hasMembers === true;
+    return activeNode.value.hasMembers === true || (activeNode.value.hasMembers === undefined && supportsOracleTypeAttributeExpansion(currentDatabaseType()));
   }
   return canTreeNodeShowExpander({
     type: activeNode.value.type,
@@ -5839,6 +5992,7 @@ const canOpenTableImport = computed(() => {
 });
 
 const canOpenStructureEditor = computed(() => {
+  if (isSchemaIndexNode(activeNode.value)) return supportsSchemaIndexManagement(currentDatabaseType()) && !!schemaIndexNodeIdentity(activeNode.value);
   return sidebarNodeSupportsStructureEdit(activeNode.value, currentTableStructureDatabaseType());
 });
 
@@ -6307,15 +6461,19 @@ routeDangerDialog(showClearElasticsearchIndexConfirm, () => {
   });
 });
 
-routeDangerDialog(showFlushRedisDbConfirm, () =>
-  dangerRequest({
+routeDangerDialog(showFlushRedisDbConfirm, () => {
+  const node = sidebarDangerTarget.value ?? activeNode.value;
+  const connectionId = node.connectionId ?? activeNode.value.connectionId;
+  const isCluster = connectionId ? connectionStore.getConfig(connectionId)?.redis_connection_mode === "cluster" : false;
+  return dangerRequest({
     title: t("redis.flushDb"),
     message: t("redis.flushDbMessage"),
-    details: t("redis.flushDbDetails", { db: activeNode.value.database }),
+    detailsText: t("redis.flushDbDetails", { db: node.database ?? "" }),
+    sql: redisFlushDbPreview(node.database, isCluster),
     confirmLabel: t("redis.flushDbConfirm"),
     confirm: confirmFlushRedisDb,
-  }),
-);
+  });
+});
 
 routeDangerDialog(showDropSchemaConfirm, () =>
   dangerRequest({
@@ -7671,6 +7829,20 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
+  if (isSchemaIndexNode(node)) {
+    items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    if (!schemaIndexNodeIdentity(node)) items.push({ label: t("schemaIndex.parentUnavailable"), disabled: true });
+    if (schemaIndexNodeIdentity(node) && supportsSchemaIndexManagement(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.viewObject"), action: () => openSchemaIndexInfo(node), icon: Eye });
+    }
+    if (canEditSchemaIndex(node)) {
+      items.push({ label: t("contextMenu.editIndex"), action: openStructureEditor, icon: PencilRuler });
+      items.push({ label: deleteMenuLabel(t("contextMenu.dropIndex")), action: deleteMenuAction(() => requestSchemaIndexDelete(node)), icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+    }
+    items.push({ label: t("contextMenu.refreshChildren"), action: refresh, icon: RefreshCw, shortcut: shortcutRefresh.value });
+    return true;
+  }
+
   if (node.type === "index" || node.type === "fkey" || (node.type === "trigger" && !!node.tableName)) {
     items.push(node.type === "trigger" || node.type === "index" ? copyNameMenuItem() : { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
     if (node.type === "trigger") {
@@ -7833,16 +8005,22 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  // PostgreSQL-family types expand in the tree and expose DDL as a lightweight
-  // copy action. Xugu keeps its source/change-open-mode entries.
+  // Oracle-family and Xugu types expose their source; PostgreSQL-family types
+  // keep the existing DDL copy action.
   if (node.type === "type" || node.type === "type-body") {
     if (supportsTypeObjectSource(currentDatabaseType())) {
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+      if (supportsOracleFamilyTypeManagement(currentDatabaseType())) {
+        items.push({ label: t("contextMenu.editObject"), action: () => openObjectSourceDialog(true), icon: Pencil });
+        items.push({ label: deleteMenuLabel(t("contextMenu.dropObject")), action: deleteMenuAction(requestDropObject), icon: Trash2, shortcut: shortcutDelete, variant: "destructive" });
+      }
       items.push(copyNameMenuItem());
-      items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      if (currentDatabaseType() === "xugu") {
+        items.push({ label: t("contextMenu.changeOpenMode"), action: () => emit("open-settings", "navigation"), icon: Settings2 });
+      }
       return true;
     }
-    if (customTypeCapabilities(currentDatabaseType()).details) {
+    if (customTypeCapabilities(currentDatabaseType()).ddl) {
       items.push({ label: t("contextMenu.copyDdl"), action: copyCustomTypeDdl, icon: Copy });
       items.push({ label: "", separator: true });
     }
@@ -7881,13 +8059,17 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     const hasMongoDropAllIndexesAction = node.type === "group-indexes" && canDropAllMongoIndexes.value;
     const canCreateGroupView = node.type === "group-views" && !!node.connectionId && !!node.database && !["neo4j", "nebula"].includes(currentDatabaseType() || "");
     const canCreateTableGroup = isTableVGroupContainerNode(node);
-    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction;
+    const canCreateSchemaIndex = node.type === "group-database-indexes" && supportsSchemaIndexManagement(currentDatabaseType()) && !connectionIsEffectivelyReadOnly(connectionStore.getConfig(node.connectionId || ""));
+    const hasGroupAction = (node.type === "group-tables" && canCreateTable.value) || canCreateTableGroup || canCreateGroupView || !!objectTemplate || hasMongoCreateIndexAction || hasMongoDropAllIndexesAction || canCreateSchemaIndex;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-dolt-system-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
     }
     if (canCreateGroupView) {
       items.push({ label: t("contextMenu.createView"), action: createView, icon: Plus });
+    }
+    if (canCreateSchemaIndex) {
+      items.push({ label: t("structureEditor.addIndex"), action: openSchemaIndexCreate, icon: Plus });
     }
     if (node.type === "group-events" && node.connectionId && node.database) {
       items.push({ label: t("contextMenu.createEvent"), action: openMysqlEventCreateEditor, icon: Plus });
@@ -8049,8 +8231,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
   const batchEmptyCount = selectedBatchEmptyTargets().length;
   const batchTruncateCount = selectedBatchTruncateTargets().length;
   const batchAutoIncrementCount = selectedBatchMysqlAutoIncrementTargets().length;
-  const deleteMenuLabel = (singleLabel: string) => (batchDropCount > 1 ? batchDropMenuLabel() : singleLabel);
-  const deleteMenuAction = (singleAction: () => void) => (batchDropCount > 1 ? requestBatchDrop : singleAction);
+  const individualIndexes = hasSchemaIndexBatchSelection();
+  const deleteMenuLabel = (singleLabel: string) => (individualIndexes ? t("schemaIndex.editIndividually") : batchDropCount > 1 ? batchDropMenuLabel() : singleLabel);
+  const deleteMenuAction = (singleAction: () => void) => (individualIndexes ? explainIndividualIndexEditing : batchDropCount > 1 ? requestBatchDrop : singleAction);
   const truncateMenuLabel = (singleLabel: string) => (batchTruncateCount > 1 ? batchTruncateMenuLabel() : singleLabel);
   const truncateMenuAction = (singleAction: () => void) => (batchTruncateCount > 1 ? requestBatchTruncate : singleAction);
   const emptyMenuLabel = (singleLabel: string) => (batchEmptyCount > 1 ? batchEmptyMenuLabel() : singleLabel);

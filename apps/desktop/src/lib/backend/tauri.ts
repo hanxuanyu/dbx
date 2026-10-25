@@ -8,7 +8,7 @@ import type { DamengDumpKind, DamengDumpRequest, DamengDumpProgress } from "./da
 import type { UserSkillRootSettings, UserSkillsListResult, UserSkillsReadResult } from "@/types/userSkills";
 import type { DatabaseBackupCommand, DatabaseBackupBackgroundStatus } from "@/lib/backup/backgroundDatabaseBackup";
 import { functionDiffsToWire, functionInfoFromWire, schemaDiffPreparationFromWire, schemaDiffPreparationToWire, type FunctionInfoWire, type SchemaDiffPreparationWire } from "./functionInfoTransport";
-import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan } from "@/types/schemaDiff";
+import type { OracleRoutineSnapshot, OracleRoutineOperation, OracleRoutineOperationObservation, OracleRoutineSaveInput, OracleRoutinePlanInput, OracleRoutinePlan, OracleRoutineReadOptions, OracleRoutineIdentity } from "@/types/schemaDiff";
 
 export function databaseBackupCommand<T = unknown>(command: DatabaseBackupCommand): Promise<T> {
   return invoke("database_backup_command", { command });
@@ -82,6 +82,14 @@ import type {
   CompletionAssistantResponse,
   ObjectStatistics,
   CustomTypeDetails,
+  OracleTypeManagementSnapshot,
+  OracleTypeManagementObjectKey,
+  OracleTypeManagementSqlInput,
+  OracleTypeManagementSqlResult,
+  OracleTypeDataRequest,
+  OracleTypeDataResult,
+  OracleTypeEvolutionRequest,
+  OracleTypeEvolutionManifest,
   ObjectSource,
   ObjectSourceKind,
   MysqlEventInfo,
@@ -161,7 +169,16 @@ import type { DmlChangePreviewSqlOptions, DmlChangePreviewSqlResult } from "@/li
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
-import type { BuildCreatePartitionedTableSqlOptions, BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TablePartitionSqlOptions, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
+import type {
+  BuildCreatePartitionedTableSqlOptions,
+  BuildTableOwnerChangeSqlOptions,
+  BuildTableStructureChangeSqlOptions,
+  BuildSingleColumnAlterSqlOptions,
+  MysqlTableCharsetChange,
+  SqliteTableStructureChangePreview,
+  TablePartitionSqlOptions,
+  TableStructureChangeSql,
+} from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { DatabaseStructureSearchSql, DatabaseStructureSearchSqlOptions } from "@/lib/database/databaseStructureSearch";
@@ -1377,6 +1394,20 @@ export async function listSqlFilesInFolder(folderPath: string, fileFilter?: stri
   return invoke("list_sql_files_in_folder", { folderPath, fileFilter, includeEmptyDirectories });
 }
 
+export type SqlFileContentMatch = import("@/lib/savedSql/savedSqlSearch").SavedSqlSearchMatchResult & {
+  path: string;
+};
+
+export interface SqlFileContentSearchResult {
+  files: SqlFileContentMatch[];
+  skippedFiles: { path: string; reason: string }[];
+  truncated: boolean;
+}
+
+export async function searchSqlFileContents(roots: string[], query: string, fileFilter?: string): Promise<SqlFileContentSearchResult> {
+  return invoke("search_sql_file_contents", { roots, query, fileFilter });
+}
+
 export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
   return invoke("create_sql_file_in_folder", { rootPath, directoryPath, fileName });
 }
@@ -1794,7 +1825,18 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return invoke("delete_schema_cache_prefix", { prefix });
 }
 
-export async function listTables(connectionId: string, database: string, schema: string, filter?: string, limit?: number, offset?: number, objectTypes?: SidebarObjectKind[], catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<TableInfo[]> {
+export async function listTables(
+  connectionId: string,
+  database: string,
+  schema: string,
+  filter?: string,
+  limit?: number,
+  offset?: number,
+  objectTypes?: SidebarObjectKind[],
+  catalog?: string,
+  tableNameFilter?: import("@/types/database").TableNameFilter,
+  exactIdentity?: boolean,
+): Promise<TableInfo[]> {
   return invoke("list_tables", {
     connectionId,
     database,
@@ -1805,16 +1847,18 @@ export async function listTables(connectionId: string, database: string, schema:
     objectTypes,
     catalog,
     tableNameFilter,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
-export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string | null> {
+export async function getTableComment(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<string | null> {
   return invoke("get_table_comment", {
     connectionId,
     database,
     schema,
     table,
     catalog,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -1833,6 +1877,7 @@ export async function listObjects(
   catalog?: string,
   tableNameFilter?: import("@/types/database").TableNameFilter,
   executionId?: string,
+  exactIdentity?: boolean,
 ): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
@@ -1845,6 +1890,7 @@ export async function listObjects(
     catalog,
     tableNameFilter,
     executionId,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -1887,7 +1933,19 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
   return invoke("get_custom_type_details", { connectionId, database, schema, name });
 }
-export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string): Promise<ColumnInfo[]> {
+export async function getOracleTypeManagementSnapshot(connectionId: string, database: string, owner: string, name: string, knownObjects: OracleTypeManagementObjectKey[] = []): Promise<OracleTypeManagementSnapshot> {
+  return invoke("get_oracle_type_management_snapshot", { connectionId, database, owner, name, knownObjects });
+}
+export function buildOracleTypeManagementSql(input: OracleTypeManagementSqlInput): Promise<OracleTypeManagementSqlResult> {
+  return invoke("build_oracle_type_management_sql", { input });
+}
+export function verifyOracleTypeData(input: OracleTypeDataRequest): Promise<OracleTypeDataResult> {
+  return invoke("verify_oracle_type_data", { input });
+}
+export function prepareOracleTypeEvolution(input: OracleTypeEvolutionRequest): Promise<OracleTypeEvolutionManifest> {
+  return invoke("prepare_oracle_type_evolution", { input });
+}
+export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string, currentSchema?: string, exactIdentity?: boolean): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
     database,
@@ -1896,6 +1954,7 @@ export async function getColumns(connectionId: string, database: string, schema:
     catalog,
     clientSessionId,
     currentSchema,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -1974,6 +2033,7 @@ export async function executeConditionalUpdate(
     clientSessionId?: string;
     timeoutSecs?: number;
     executionMode?: "simple" | "postgres_read_only_transaction";
+    typeRecovery?: import("@/types/database").TypeRecoveryContext;
   },
 ): Promise<QueryResult> {
   try {
@@ -2005,6 +2065,7 @@ export async function executeMulti(
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
+    deferLobs?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -2081,6 +2142,7 @@ export async function executeMultiWithProgress(
     maxResultBytes?: number;
     resultKeyColumns?: string[];
     tableDataPreview?: boolean;
+    deferLobs?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -2120,10 +2182,11 @@ export async function cancelQuery(executionId: string): Promise<boolean> {
 export interface ConditionalUpdateCancellationResult {
   requested: boolean;
   terminal: boolean;
+  databaseTerminal?: boolean;
 }
 
-export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
-  return invoke("cancel_conditional_update", { executionId });
+export async function cancelConditionalUpdate(executionId: string, options?: { cancel?: boolean; typeRecovery?: import("@/types/database").TypeExecutionBinding }): Promise<ConditionalUpdateCancellationResult> {
+  return invoke("cancel_conditional_update", { executionId, ...options });
 }
 
 export async function readLargeValueChunk(request: import("./http").LargeValueRequest): Promise<import("./http").LargeValueChunk> {
@@ -2147,13 +2210,14 @@ export async function exportSnapshotResult(request: import("./http").SnapshotExp
   signal?.throwIfAborted();
 }
 
-export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
+export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string, txnSessionId?: string): Promise<boolean> {
   return invoke("close_query_session", {
     connectionId,
     database,
     sessionId,
     clientSessionId,
     catalog,
+    txnSessionId,
   });
 }
 
@@ -2220,6 +2284,7 @@ export async function executeInManualTransaction(
   executionId?: string,
   timeoutSecs?: number,
   boundStatements?: BlobBoundStatement[],
+  deferLobs?: boolean,
 ): Promise<QueryResult[]> {
   return invokeBackend("execute_in_manual_transaction", {
     txnSessionId,
@@ -2234,6 +2299,7 @@ export async function executeInManualTransaction(
     executionId,
     timeoutSecs,
     boundStatements,
+    deferLobs,
   });
 }
 
@@ -2482,8 +2548,8 @@ export async function reviewOracleViewRenameSource(input: OracleViewRenameSource
   return invoke("review_oracle_view_rename_source", { input });
 }
 
-export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions): Promise<TableStructureChangeSql> {
-  return invoke("build_table_structure_change_sql", { options, starrocks });
+export async function buildTableStructureChangeSql(options: BuildTableStructureChangeSqlOptions, starrocks?: StarRocksAlterOptions, mysqlTableCharset?: MysqlTableCharsetChange): Promise<TableStructureChangeSql> {
+  return invoke("build_table_structure_change_sql", { options, starrocks, mysqlTableCharset });
 }
 
 export async function buildTableOwnerChangeSql(options: BuildTableOwnerChangeSqlOptions): Promise<TableStructureChangeSql> {
@@ -2637,13 +2703,14 @@ export async function buildDataCompareSyncPlan(options: DataCompareSyncPlanOptio
   return invoke("build_data_compare_sync_plan", { options });
 }
 
-export async function listIndexes(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<IndexInfo[]> {
+export async function listIndexes(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<IndexInfo[]> {
   return invoke("list_indexes", {
     connectionId,
     database,
     schema,
     table,
     catalog,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -2667,13 +2734,14 @@ export async function listReferenceKeys(connectionId: string, database: string, 
   });
 }
 
-export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ForeignKeyInfo[]> {
+export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<ForeignKeyInfo[]> {
   return invoke("list_foreign_keys", {
     connectionId,
     database,
     schema,
     table,
     catalog,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -2681,23 +2749,25 @@ export async function listForeignKeysForDatabase(connectionId: string, database:
   return invoke("list_foreign_keys_for_database", { connectionId, database, schema, catalog, executionId });
 }
 
-export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
+export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<TriggerInfo[]> {
   return invoke("list_triggers", {
     connectionId,
     database,
     schema,
     table,
     catalog,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
-export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string, exactIdentity?: boolean): Promise<ConstraintInfo[]> {
   return invoke("list_constraints", {
     connectionId,
     database,
     schema,
     table,
     catalog,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
   });
 }
 
@@ -2754,7 +2824,7 @@ export async function listSubpartitions(connectionId: string, database: string, 
   });
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false, exactIdentity?: boolean, separateIndexes?: boolean): Promise<string> {
   return invoke("get_table_ddl", {
     connectionId,
     database,
@@ -2763,10 +2833,12 @@ export async function getTableDdl(connectionId: string, database: string, schema
     objectType,
     catalog,
     portable,
+    ...(exactIdentity ? { exactIdentity: true } : {}),
+    ...(separateIndexes ? { separateIndexes: true } : {}),
   });
 }
 
-export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+export async function getTableDisplayDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, separateIndexes?: boolean): Promise<string> {
   return invoke("get_table_ddl", {
     connectionId,
     database,
@@ -2775,6 +2847,7 @@ export async function getTableDisplayDdl(connectionId: string, database: string,
     objectType,
     catalog,
     includePostgresAccess: true,
+    ...(separateIndexes ? { separateIndexes: true } : {}),
     portable: false,
   });
 }
@@ -2812,8 +2885,8 @@ export async function listFunctions(connectionId: string, database: string, sche
   return (await invoke<FunctionInfoWire[]>("list_functions", { connectionId, database, schema })).map(functionInfoFromWire);
 }
 
-export function loadSchemaDiffRoutines(connectionId: string, database: string, schema: string, selectedRoutines?: string[]): Promise<OracleRoutineSnapshot> {
-  return invoke("load_schema_diff_routines", { connectionId, database, schema, ...(selectedRoutines === undefined ? {} : { selectedRoutines }) });
+export function loadSchemaDiffRoutines(connectionId: string, database: string, schema: string, selectedRoutines?: string[], options?: OracleRoutineReadOptions): Promise<OracleRoutineSnapshot> {
+  return invoke("load_schema_diff_routines", { connectionId, database, schema, ...(selectedRoutines === undefined ? {} : { selectedRoutines }), ...options });
 }
 
 export function prepareOracleRoutineSave(input: OracleRoutineSaveInput): Promise<OracleRoutineOperation> {
@@ -5615,7 +5688,7 @@ export interface HistoryConnectionOption extends HistoryConnectionFilter {
 export type TaskType = "transfer";
 export type TaskLifecycleOwner = "tauri" | "web";
 export type TaskRunStatus = "running" | "succeeded" | "partial_failed" | "failed" | "cancelled";
-export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "trigger" | "sequence" | "event" | "object";
+export type TaskItemKind = "table" | "view" | "materialized_view" | "procedure" | "function" | "package" | "package_body" | "trigger" | "sequence" | "event" | "object";
 export type TaskItemStatus = "pending" | "running" | "succeeded" | "skipped" | "failed" | "cancelled" | "not_started" | "incomplete";
 export type TaskRowCountState = "not_applicable" | "known" | "unknown" | "incomplete";
 export type TransferRunContent = "structure_and_data" | "structure_only" | "data_only";
@@ -5897,7 +5970,7 @@ export type TransferTableNameCase = "preserve" | "lower" | "upper";
 export type TransferColumnNameCase = "preserve" | "lower" | "upper";
 export type TransferOwnershipPolicy = "preserve" | "skip" | "reassignMissing";
 export type TransferContent = "structureAndData" | "structureOnly" | "dataOnly";
-export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT";
+export type TransferObjectKind = "TABLE" | "VIEW" | "MATERIALIZED_VIEW" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "SEQUENCE" | "EVENT" | "PACKAGE" | "PACKAGE_BODY" | "SYNONYM";
 
 export interface TransferObjectSelection {
   objectType: TransferObjectKind;
@@ -5935,6 +6008,28 @@ export interface TransferRequest {
   tableFilters?: Record<string, string>;
   dropTargetBeforeCreate: boolean;
   dropTargetConfirmed: boolean;
+  oraclePackages?: OraclePackageTransferRequest;
+}
+
+export interface OraclePackageTransferRequest {
+  input?: OracleRoutinePlanInput;
+  operationIds?: string[];
+  pendingTables?: OraclePackagePendingTables;
+}
+
+export interface OraclePackagePendingTables {
+  source: OracleRoutinePlanInput["source"]["endpoint"];
+  target: OracleRoutinePlanInput["target"]["endpoint"];
+  tables: unknown[];
+  dependencyManifest: unknown;
+  tableEvidence: unknown[];
+}
+
+export interface OraclePackageTransferPreview {
+  input: OracleRoutinePlanInput;
+  plan: OracleRoutinePlan;
+  skipped: OracleRoutineIdentity[];
+  pendingTables?: OraclePackagePendingTables;
 }
 
 export interface TransferStructurePreviewTable {
@@ -5975,9 +6070,13 @@ export interface TransferOwnershipPreview {
   };
   /** Structure-plan preview: present for structure-only transfers. */
   structure?: TransferStructurePreview;
+  oraclePackages?: OraclePackageTransferPreview;
 }
 
 export interface TransferProgress {
+  oraclePackageApproval?: OraclePackageTransferPreview;
+  oraclePackagePreflight?: OraclePackageTransferPreview;
+  oracleRoutineOperation?: OracleRoutineOperation;
   transferId: string;
   table: string;
   tableIndex: number;
