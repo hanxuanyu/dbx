@@ -46,6 +46,7 @@ const under = (namespace: string, keys: string[]) => keys.map((key) => `${namesp
 // English.
 const FEATURE_MESSAGES: FeatureMessages[] = [
   { feature: "query connection group path preview", keys: ["connection.groupPath"], translated: true },
+  { feature: "SQL file includes", keys: under("sqlFile", ["resolveIncludes", "resolveIncludesHint"]), translated: true },
   { feature: "AstraFlow provider", keys: ["ai.astraflowDescription"], translated: true },
   { feature: "AI HTML preview (#6467)", keys: under("ai", ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"]) },
   { feature: "AI conversation export (#6467)", keys: under("ai", ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"]) },
@@ -232,6 +233,11 @@ describe("feature message rendering", () => {
 });
 
 describe("feature message content rules", () => {
+  it.each(ALL_LOCALES)("%s renders include syntax literally instead of resolving an i18n link", (locale) => {
+    const i18n = createI18n({ legacy: false, locale, messages: { [locale]: declared[locale] } });
+    expect(i18n.global.t("sqlFile.resolveIncludesHint")).toContain("-- @include");
+    i18n.dispose();
+  });
   it.each(EXCEPT_AZ_TR)("%s keeps the Dameng validity labels as the database literals", (locale) => {
     const objects = (locale === "en" ? en : declared[locale]).objects as Messages | undefined;
     expect(objects?.validStatus ?? en.objects.validStatus).toBe("VALID");
