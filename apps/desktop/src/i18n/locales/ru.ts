@@ -1085,6 +1085,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "Предпросмотр ограничен первыми {limit} из {total} совпадающих строк.",
   },
   connection: {
+    groupPath: "Путь группы",
     title: "Новое подключение",
     name: "Имя",
     namePlaceholder: "Имя подключения; создаётся автоматически, если пусто",

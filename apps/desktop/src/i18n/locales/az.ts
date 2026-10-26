@@ -610,6 +610,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Qrup yolu",
     title: "Yeni əlaqə",
     name: "Ad",
     namePlaceholder: "Əlaqənin adı, boş olarsa avtomatik yaradılır",

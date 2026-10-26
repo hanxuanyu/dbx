@@ -1105,6 +1105,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "一致する全 {total} 行のうち、先頭 {limit} 行のみプレビューできます。",
   },
   connection: {
+    groupPath: "グループパス",
     title: "新しい接続",
     name: "名前",
     namePlaceholder: "接続名（空の場合は自動生成）",

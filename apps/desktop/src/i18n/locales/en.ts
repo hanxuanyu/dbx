@@ -1266,6 +1266,7 @@ export default {
   },
 
   connection: {
+    groupPath: "Group path",
     title: "New Connection",
     name: "Name",
     namePlaceholder: "Connection name, auto-generated if empty",

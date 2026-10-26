@@ -1195,6 +1195,7 @@ export default withEnglishFallback({
     matchPreviewLimit: "แสดงตัวอย่างได้เฉพาะ {limit} บรรทัดแรกจากทั้งหมด {total} บรรทัดที่ตรงกัน",
   },
   connection: {
+    groupPath: "เส้นทางกลุ่ม",
     title: "การเชื่อมต่อใหม่",
     name: "ชื่อ",
     namePlaceholder: "ชื่อการเชื่อมต่อ สร้างอัตโนมัติหากว่าง",

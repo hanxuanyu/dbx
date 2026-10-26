@@ -1110,6 +1110,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "群組路徑",
     title: "建立連線",
     name: "名稱",
     namePlaceholder: "連線名稱，留空則自動產生",

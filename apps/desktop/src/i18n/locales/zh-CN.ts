@@ -1202,6 +1202,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "分组路径",
     title: "新建连接",
     name: "名称",
     namePlaceholder: "连接名称，留空则自动生成",

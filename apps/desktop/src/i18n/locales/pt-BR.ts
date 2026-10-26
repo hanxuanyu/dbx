@@ -1106,6 +1106,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Caminho do grupo",
     title: "Nova Conexão",
     name: "Nome",
     namePlaceholder: "Nome da conexão, gerado automaticamente se vazio",

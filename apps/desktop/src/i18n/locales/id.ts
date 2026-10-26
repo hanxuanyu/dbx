@@ -813,6 +813,7 @@ export default withEnglishFallback({
   },
 
   connection: {
+    groupPath: "Jalur grup",
     title: "Koneksi Baru",
     name: "Nama",
     namePlaceholder: "Nama koneksi, dibuat otomatis jika kosong",
