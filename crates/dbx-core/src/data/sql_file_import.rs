@@ -737,6 +737,12 @@ pub async fn execute_sql_file_content(
     started_at: Instant,
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     if request.resolve_includes {
         let error = "SQL includes require local .sql file execution, not inline content".to_string();
         emit(sql_file_error_progress(&request.execution_id, started_at, error.clone()));
@@ -886,6 +892,12 @@ async fn execute_sql_file_paths_with_options(
     zip_package: bool,
     mut emit: impl FnMut(SqlFileProgress),
 ) -> Result<(), String> {
+    crate::query::mysql_data_charset_policy::reject_operation(
+        state,
+        &request.connection_id,
+        crate::query::mysql_data_charset_policy::READ_ONLY,
+    )
+    .await?;
     let prepared;
     let mut expanded_request;
     let expanded_paths;
@@ -2497,7 +2509,15 @@ async fn sql_file_import_target(state: &AppState, connection_id: &str, database:
     } else {
         SqlCompatibilityMode::NotApplicable
     };
-    Some(SqlFileImportTarget { db_type: config.db_type, driver_profile: config.driver_profile, compatibility_mode })
+    Some(SqlFileImportTarget {
+        // Split with the connection's statement-splitting dialect, not its
+        // routing `db_type`: a JDBC SQL Server connection keeps control-flow
+        // batches whole (#13514), a JDBC Oracle connection keeps PL/SQL units
+        // whole. The rest of the import still routes on the raw `db_type`.
+        db_type: crate::query::statement_split_database_type(&config),
+        driver_profile: config.driver_profile,
+        compatibility_mode,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2860,6 +2880,14 @@ async fn execute_statement_with_progress(
         }
         Err(error) => {
             if statement.source_statement_count > 1 && !token.is_cancelled() {
+                // A merged batch is an optimization, never a contract: replay the
+                // source statements one by one. Log it because the replay is
+                // orders of magnitude slower and would otherwise be invisible.
+                log::warn!(
+                    "[sql_file_import] merged statement ({} source statements, {} bytes) failed, replaying individually: {error}",
+                    statement.source_statement_count,
+                    statement.sql.len()
+                );
                 return execute_merged_statement_fallback_with_progress(
                     state,
                     request,
@@ -4279,6 +4307,30 @@ mod tests {
         assert!(planned[0].sql.contains("SET statement_timeout = 0"));
         assert_eq!(planned[1].sql, "SELECT 1");
         assert_eq!(planned[2].kind, SqlFileImportStatementKind::Skip);
+    }
+
+    #[test]
+    fn oceanbase_oracle_insert_file_plans_one_insert_all_batch() {
+        let statements = split_sql_file_import_statements_with_control(
+            "INSERT INTO T (ID) VALUES (1);\nINSERT INTO T (ID) VALUES (2);\n",
+            Some(DatabaseType::OceanbaseOracle),
+            None,
+        );
+
+        let planned = plan_sql_file_statements(&statements, Some(DatabaseType::OceanbaseOracle), None, false, None);
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].statement.source_statement_count, 2);
+        assert_eq!(
+            planned[0].statement.sql,
+            "INSERT ALL\nINTO T (ID) VALUES (1)\nINTO T (ID) VALUES (2)\nSELECT 1 FROM dual"
+        );
+
+        // A manual transaction must keep every source statement on its own error
+        // boundary, so it never merges.
+        let manual = plan_sql_file_statements(&statements, Some(DatabaseType::OceanbaseOracle), None, true, None);
+        assert_eq!(manual.len(), 2);
+        assert_eq!(manual[0].statement.sql, "INSERT INTO T (ID) VALUES (1)");
     }
 
     #[test]

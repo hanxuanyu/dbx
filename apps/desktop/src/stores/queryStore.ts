@@ -79,6 +79,7 @@ import {
   splitSiblingDbPrefix,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongo/mongoShellCommand";
+import { prepareMongoQueryText, type MongoQueryLanguage } from "@/lib/mongo/mongoSql";
 import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
@@ -120,9 +121,10 @@ import { queryResultNameFromPreamble, queryResultSourceLabel, queryResultSourceN
 import { sqlServerCountUsesLocalTempTable } from "@/lib/query/queryResultCountSession";
 import { stripPaginationRowNumber, trimQueryPageProbe } from "@/lib/query/queryPaginationResult";
 import { prepareBatchQueryPagination, type BatchQueryPaginationPlan } from "@/lib/query/batchQueryPagination";
+import { originalResultRowOrder } from "@/lib/dataGrid/resultKeyLocator";
 import { mysqlTablePageBaseSql } from "@/lib/table/tableDataPageProbe";
 import { beginDataGridNativeSelectionBlock, finishDataGridNativeSelectionBlock } from "@/lib/dataGrid/dataGridNativeSelection";
-import { appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
+import { appendIndexedResultCells, remapIndexedResultCells, appendLargeValueCells, canUseTableDataLargeValuePreview, remapLargeValueCells, supportsTableDataLargeValuePreview, tableDataLargeValuePreviewOptions, TABLE_DATA_RESULT_MAX_BYTES } from "@/lib/dataGrid/dataGridLargeValues";
 import { simpleDataGridOrderByReferencesMissingColumn, sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
@@ -405,6 +407,7 @@ function markQueryResultRowsRaw(result: QueryResult): QueryResult {
   markRaw(result.rows);
   if (result.neo4j_node_cells) markRaw(result.neo4j_node_cells);
   if (result.large_value_cells) markRaw(result.large_value_cells);
+  if (result.raw_key_cells) markRaw(result.raw_key_cells);
   if (result.mongo_documents) markRaw(result.mongo_documents);
   if (result.mongo_copy_documents) markRaw(result.mongo_copy_documents);
   return result;
@@ -465,6 +468,7 @@ export function appendQueryResultSegment(previous: QueryResult, segment: QueryRe
     spatial_columns: spatial_columns.length > 0 ? spatial_columns : undefined,
     spatial_values: appendParallelValues(previous.spatial_values, segment.spatial_values),
     large_value_cells: appendLargeValueCells(previous.large_value_cells, segment.large_value_cells, previous.rows.length, appendedRowCount),
+    raw_key_cells: appendIndexedResultCells(previous.raw_key_cells, segment.raw_key_cells, previous.rows.length, appendedRowCount),
     large_value_context: segment.large_value_context ?? previous.large_value_context,
     large_value_refs: [
       ...new Set([...(previous.large_value_refs ?? []), ...(segment.large_value_refs ?? []), ...(previous.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : [])), ...(segment.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))]),
@@ -492,6 +496,7 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
     if (run.results) markQueryResultsRowsRaw(run.results);
     if (run.resultLocalSortOriginalRows) markRaw(run.resultLocalSortOriginalRows);
     if (run.resultLocalSortOriginalLargeValueCells) markRaw(run.resultLocalSortOriginalLargeValueCells);
+    if (run.resultLocalSortOriginalRawKeyCells) markRaw(run.resultLocalSortOriginalRawKeyCells);
     if (run.resultLocalSortOriginalMongoDocuments) markRaw(run.resultLocalSortOriginalMongoDocuments);
     if (run.resultLocalSortOriginalMongoCopyDocuments) markRaw(run.resultLocalSortOriginalMongoCopyDocuments);
   }
@@ -514,6 +519,7 @@ function releaseResultObjectPayload(result: QueryResult): void {
   result.neo4j_node_cells = undefined;
   result.mongo_copy_documents = undefined;
   result.large_value_cells = undefined;
+  result.raw_key_cells = undefined;
   result.elasticsearch_raw_body = undefined;
   result.redis_console_output = undefined;
   result.messages = undefined;
@@ -1979,6 +1985,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEditorFingerprint = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
+    tab.resultLocalSortOriginalRawKeyCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortMode = undefined;
@@ -2017,6 +2024,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortMode = undefined;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
+    tab.resultLocalSortOriginalRawKeyCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.orderByInput = undefined;
@@ -2064,6 +2072,7 @@ export const useQueryStore = defineStore("query", () => {
     run.results = undefined;
     run.resultLocalSortOriginalRows = undefined;
     run.resultLocalSortOriginalLargeValueCells = undefined;
+    run.resultLocalSortOriginalRawKeyCells = undefined;
     run.resultLocalSortOriginalMongoDocuments = undefined;
     run.resultLocalSortOriginalMongoCopyDocuments = undefined;
     run.resultSessionId = undefined;
@@ -2102,6 +2111,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortMode = run.resultSortMode;
     tab.resultLocalSortOriginalRows = run.resultLocalSortOriginalRows;
     tab.resultLocalSortOriginalLargeValueCells = run.resultLocalSortOriginalLargeValueCells;
+    tab.resultLocalSortOriginalRawKeyCells = run.resultLocalSortOriginalRawKeyCells;
     tab.resultLocalSortOriginalMongoDocuments = run.resultLocalSortOriginalMongoDocuments;
     tab.resultLocalSortOriginalMongoCopyDocuments = run.resultLocalSortOriginalMongoCopyDocuments;
     tab.orderByInput = run.orderByInput;
@@ -2498,6 +2508,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
+      resultLocalSortOriginalRawKeyCells: tab.resultLocalSortOriginalRawKeyCells,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
       resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
@@ -2622,6 +2633,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: tab.resultSortMode,
       resultLocalSortOriginalRows: tab.resultLocalSortOriginalRows,
       resultLocalSortOriginalLargeValueCells: tab.resultLocalSortOriginalLargeValueCells,
+      resultLocalSortOriginalRawKeyCells: tab.resultLocalSortOriginalRawKeyCells,
       resultLocalSortOriginalMongoDocuments: tab.resultLocalSortOriginalMongoDocuments,
       resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments,
       orderByInput: tab.orderByInput,
@@ -2704,12 +2716,21 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab.resultLocalSortOriginalRows) {
       tab.resultLocalSortOriginalRows = tab.result.rows.slice();
       tab.resultLocalSortOriginalLargeValueCells = tab.result.large_value_cells?.map((cell) => ({ ...cell }));
+      tab.resultLocalSortOriginalRawKeyCells = tab.result.raw_key_cells?.map((cell) => ({ ...cell }));
       tab.resultLocalSortOriginalMongoDocuments = tab.result.mongo_documents?.slice();
       tab.resultLocalSortOriginalMongoCopyDocuments = tab.result.mongo_copy_documents?.slice();
     }
 
+    // Full-value reads may have resolved previews since the previous sort (or
+    // after a disk restore, whose original-order rows are separate objects).
+    // Reconcile by original keys so clearing a sort cannot resurrect placeholders.
+    const originalOrder = originalResultRowOrder(tab.result, tab.resultLocalSortOriginalRows, tab.resultLocalSortOriginalRawKeyCells);
+    if (originalOrder) {
+      tab.resultLocalSortOriginalRows = originalOrder.map((index) => tab.result!.rows[index]!);
+      tab.resultLocalSortOriginalLargeValueCells = remapLargeValueCells(tab.result.large_value_cells, originalOrder);
+    }
     const originalRows = tab.resultLocalSortOriginalRows;
-    const columnType = tab.result.column_types?.[columnIndex];
+    const columnType = (tab.result.column_types?.[columnIndex]?.trim() || undefined) ?? (tab.tableMeta?.columns?.find((c) => c.name.toLowerCase() === column.toLowerCase())?.data_type?.trim() || undefined) ?? (tab.resultColumnTypeLabels?.[columnIndex]?.trim() || undefined);
     const rowIndexes = direction ? sortDataGridRowIndexes(originalRows, columnIndex, direction, columnType) : originalRows.map((_, index) => index);
     const rows = rowIndexes.map((index) => originalRows[index]!);
     const originalMongoDocuments = tab.resultLocalSortOriginalMongoDocuments;
@@ -2717,7 +2738,8 @@ export const useQueryStore = defineStore("query", () => {
     const originalMongoCopyDocuments = tab.resultLocalSortOriginalMongoCopyDocuments;
     const mongo_copy_documents = originalMongoCopyDocuments ? rowIndexes.map((index) => originalMongoCopyDocuments[index]) : undefined;
     const large_value_cells = remapLargeValueCells(tab.resultLocalSortOriginalLargeValueCells, rowIndexes);
-    assignDisplayedResult(tab, { ...tab.result, rows, large_value_cells, mongo_documents, mongo_copy_documents });
+    const raw_key_cells = remapIndexedResultCells(tab.resultLocalSortOriginalRawKeyCells, rowIndexes);
+    assignDisplayedResult(tab, { ...tab.result, rows, large_value_cells, raw_key_cells, mongo_documents, mongo_copy_documents });
     // Reordering rows invalidates source-index view snapshots.
     publishResultGeneration(tab, "local-sort");
 
@@ -2729,6 +2751,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!direction) {
       tab.resultLocalSortOriginalRows = undefined;
       tab.resultLocalSortOriginalLargeValueCells = undefined;
+      tab.resultLocalSortOriginalRawKeyCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
@@ -5517,6 +5540,7 @@ export const useQueryStore = defineStore("query", () => {
       resultSortMode: original.mode === "data" && original.resultSortMode === "database" ? original.resultSortMode : undefined,
       resultLocalSortOriginalRows: undefined,
       resultLocalSortOriginalLargeValueCells: undefined,
+      resultLocalSortOriginalRawKeyCells: undefined,
       resultLocalSortOriginalMongoDocuments: undefined,
       resultLocalSortOriginalMongoCopyDocuments: undefined,
       orderByInput: original.mode === "data" ? original.orderByInput : undefined,
@@ -6168,6 +6192,12 @@ export const useQueryStore = defineStore("query", () => {
       });
     pendingManualTransactionStarts.set(id, { epoch, promise: start });
     return start;
+  }
+
+  function setMongoQueryLanguage(id: string, language: MongoQueryLanguage) {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab || tab.mongoQueryLanguage === language) return;
+    tab.mongoQueryLanguage = language === "sql" ? "sql" : undefined;
   }
 
   function setAutoCommit(id: string, autoCommit: boolean) {
@@ -6853,6 +6883,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.resultSortedSql = undefined;
       tab.resultLocalSortOriginalRows = undefined;
       tab.resultLocalSortOriginalLargeValueCells = undefined;
+      tab.resultLocalSortOriginalRawKeyCells = undefined;
       tab.resultLocalSortOriginalMongoDocuments = undefined;
       tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     }
@@ -8237,6 +8268,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.lastExecutedSql = sql;
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
+    tab.resultLocalSortOriginalRawKeyCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     if (captureResultRun && tab.result && !tab.activeResultRunId) {
@@ -8271,7 +8303,7 @@ export const useQueryStore = defineStore("query", () => {
       sourceTraceId: options?.sourceTraceId,
       sqlLength: sql.length,
     });
-    const queryBaseSql = options?.resultBaseSql ?? sql;
+    let queryBaseSql = options?.resultBaseSql ?? sql;
     let sqlToExecute = sql;
     let resultSortedSql = options?.resultSortedSql;
     let queryMetadataSql = queryBaseSql;
@@ -8313,7 +8345,22 @@ export const useQueryStore = defineStore("query", () => {
       const executionTarget = resumedExecutionTarget ?? options?.executionTarget;
       const usesExternalExecutionTarget = !!executionTarget;
       let conn = connStore.getConfig(executionConnectionId);
-      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sql) : undefined;
+      let mongoGeneratedShell: string | undefined;
+      let mongoSqlConsidered = false;
+      const applyMongoSql = (dbType: string | undefined) => {
+        if (mongoSqlConsidered || dbType !== "mongodb") return;
+        mongoSqlConsidered = true;
+        const prepared = prepareMongoQueryText(sqlToExecute, tab.mongoQueryLanguage, dbType, tab.mongoGeneratedShell);
+        if (!prepared.generatedShell) return;
+        mongoGeneratedShell = prepared.generatedShell;
+        sqlToExecute = prepared.sql;
+        queryBaseSql = prepared.sql;
+        queryMetadataSql = prepared.sql;
+        tab.lastExecutedSql = prepared.sql;
+        tab.mongoGeneratedShell = prepared.sql;
+      };
+      applyMongoSql(conn?.db_type);
+      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommandRanges(sqlToExecute) : undefined;
       let mongoCommands = parsedMongoCommands ?? [];
       const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
 
@@ -8332,7 +8379,8 @@ export const useQueryStore = defineStore("query", () => {
       }
       conn = connStore.getConfig(executionConnectionId);
       if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
-        mongoCommands = splitMongoCommandRanges(sql);
+        applyMongoSql(conn.db_type);
+        mongoCommands = splitMongoCommandRanges(sqlToExecute);
       }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       if (effectiveDbType === "mysql") {
@@ -8552,6 +8600,9 @@ export const useQueryStore = defineStore("query", () => {
           const commandTiming = createQueryRequestTiming(commandIndex === 0 ? startedAt : commandStartedAt);
           const annotateMongoResult = (result: QueryResult): QueryResult => {
             const annotated = annotateQueryResultSource(result, sourceStatement, undefined, undefined, sourceRange);
+            if (mongoGeneratedShell) {
+              annotated.messages = [...(annotated.messages ?? []), { severity: "INFO", code: "mongo-shell", message: sourceStatement }];
+            }
             if ("collection" in mongoCommand) {
               annotated.sourceQualifier = currentDatabase || undefined;
               annotated.sourceName = mongoCommand.collection;
@@ -10642,6 +10693,7 @@ export const useQueryStore = defineStore("query", () => {
     }
     tab.resultLocalSortOriginalRows = undefined;
     tab.resultLocalSortOriginalLargeValueCells = undefined;
+    tab.resultLocalSortOriginalRawKeyCells = undefined;
     tab.resultLocalSortOriginalMongoDocuments = undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = undefined;
     tab.resultSortColumn = undefined;
@@ -10773,6 +10825,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = snapshot.result ? markQueryResultRowsRaw(snapshot.result) : results?.[activeIndex] ? markQueryResultRowsRaw(results[activeIndex]) : undefined;
     tab.resultLocalSortOriginalRows = snapshot.resultLocalSortOriginalRows ? markRaw(snapshot.resultLocalSortOriginalRows) : undefined;
     tab.resultLocalSortOriginalLargeValueCells = snapshot.resultLocalSortOriginalLargeValueCells?.map((cell) => ({ ...cell }));
+    tab.resultLocalSortOriginalRawKeyCells = snapshot.resultLocalSortOriginalRawKeyCells?.map((cell) => ({ ...cell }));
     tab.resultLocalSortOriginalMongoDocuments = snapshot.resultLocalSortOriginalMongoDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoDocuments) : undefined;
     tab.resultLocalSortOriginalMongoCopyDocuments = snapshot.resultLocalSortOriginalMongoCopyDocuments ? markRaw(snapshot.resultLocalSortOriginalMongoCopyDocuments) : undefined;
     // 快照编解码会重建负载，落盘前的各 run 估算值不再对应恢复后的对象，
@@ -11756,6 +11809,7 @@ export const useQueryStore = defineStore("query", () => {
     updateObjectBrowserFilter,
     updateDatabaseSearchState,
     updateNacosConfigEditorViewport,
+    setMongoQueryLanguage,
     setAutoCommit,
     markManualTransactionDirty,
     commitTransaction,
